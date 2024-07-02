@@ -23,8 +23,8 @@ float rect_sdf(vec2 pos, vec2 size, float corner_radius) {
 void main() {
     // float corner_radius = 30.0;
     // float border_width = 4.0;
-    float corner_radius = 0.0;
-    float border_width = 0.0;
+    float corner_radius = 10.0;
+    float border_width = 4.0;
 
     float dist = rect_sdf(rect.pos, rect.size, corner_radius);
     float coeff = clamp(dist, -0.5, 0.5) + 0.5;
@@ -33,12 +33,18 @@ void main() {
     vec4 clear = vec4(0.0, 0.0, 0.0, 0.0); 
     vec4 red = vec4(1.0, 0.0, 0.0, 1.0);
     vec4 green = vec4(0.0, 1.0, 0.0, 1.0);
+    vec4 blue = vec4(0.0, 0.0, 1.0, 1.0);
     
     float inner = 1.0 - adjusted_coeff - coeff;
+    vec4 rect_color = clear * coeff + red * inner + green * adjusted_coeff;
+    // vec4 rect_color = clear * border_coeff + red * (1.0 - border_coeff);
+    // vec4 rect_color = red;
     
-    float c = textureLod(tex, (rect.tex_coords + rect.pos), 0).r;
+    float tex_alpha = textureLod(tex, (rect.tex_coords + rect.pos), 0).r;
+    vec4 tex_color = mix(clear, blue, tex_alpha);
 
+    outColor = mix(rect_color, tex_color, rect.tex_blend);
+    
     // outColor = clear * coeff + red * inner + green * adjusted_coeff;
-    outColor = mix(clear, red, c);
     // outColor = vec4(rect.tex_coords / vec2(204.0, 204.0), 0.0, 1.0);
 }

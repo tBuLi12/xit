@@ -18,9 +18,8 @@ use ash::vk::DescriptorSetLayoutBinding;
 use ash::vk::DescriptorType;
 use ash::vk::PipelineVertexInputStateCreateInfo;
 use ash::vk::ShaderStageFlags;
-use ui::draw_example;
-use ui::App;
-use ui::TestRuntime;
+use static_ui::Component;
+
 use winit::event::ElementState;
 use winit::event::Event;
 use winit::event::KeyEvent;
@@ -33,7 +32,8 @@ use winit::raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 use winit::window;
 use winit::window::WindowAttributes;
 
-mod ui;
+mod static_ui;
+// mod ui;
 
 struct Renderer {
     instance: ash::Instance,
@@ -1005,7 +1005,7 @@ impl Renderer {
 
     fn draw_frame(&mut self) -> Result<(), Box<dyn Error>> {
         unsafe {
-            let mut text_rects: Vec<_> = self
+            let mut rects: Vec<_> = self
                 .text_boxes
                 .iter_mut()
                 .flat_map(|text_box| {
@@ -1050,7 +1050,8 @@ impl Renderer {
                                             + glyph_rect.left as f32,
                                         text_box.bounds.pos[1]
                                             - physical_glyph.y as f32
-                                            - glyph_rect.top as f32,
+                                            - glyph_rect.top as f32
+                                            + text_box.bounds.size[1],
                                     ],
                                     size: glyph_rect.tex_location.size,
                                     tex_coords: glyph_rect.tex_location.pos,
@@ -1131,7 +1132,8 @@ impl Renderer {
                                         + image.placement.left as f32,
                                     text_box.bounds.pos[1]
                                         - physical_glyph.y as f32
-                                        - image.placement.top as f32,
+                                        - image.placement.top as f32
+                                        + text_box.bounds.size[1],
                                 ],
                                 size: [image.placement.width as f32, image.placement.height as f32],
                                 tex_coords: [
@@ -1145,6 +1147,18 @@ impl Renderer {
 
                     glyph_rects.into_iter()
                 })
+                .collect();
+
+            let rects: Vec<_> = self
+                .rectangles
+                .iter()
+                .map(|rect| RenderedRectangle {
+                    tex_blend: 0.0,
+                    pos: [rect.pos[0], rect.pos[1]],
+                    size: [rect.size[0], rect.size[1]],
+                    tex_coords: [0.0, 0.0],
+                })
+                .chain(rects.into_iter())
                 .collect();
 
             let (present_index, _) = self
@@ -1179,7 +1193,7 @@ impl Renderer {
             );
 
             self.instance_input_buffers[present_index as usize]
-                .copy_from_slice(&self.device, &text_rects);
+                .copy_from_slice(&self.device, &rects);
 
             record_submit_commandbuffer(
                 &self.device,
@@ -1221,7 +1235,7 @@ impl Renderer {
                         &self.swapchain_stuff.viewports,
                     );
                     device.cmd_set_scissor(draw_command_buffer, 0, &self.swapchain_stuff.scissors);
-                    device.cmd_draw(draw_command_buffer, 6, text_rects.len() as u32, 0, 0);
+                    device.cmd_draw(draw_command_buffer, 6, rects.len() as u32, 0, 0);
                     // eprintln!("Drawing {:#?}", &text_rects);
                     device.cmd_end_render_pass(draw_command_buffer);
                 },
@@ -1533,17 +1547,44 @@ unsafe fn create_framebuffers(
     framebuffers
 }
 
-fn main() -> Result<(), Box<dyn Error>> {
-    let mut test_runtime = TestRuntime::new();
-    let mut app = App::new(draw_example, &mut test_runtime);
-    app.click(150.0, 150.0, &mut test_runtime);
-    return Ok(());
+impl static_ui::Runtime for Renderer {
+    fn draw_rect(
+        &mut self,
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+        corner_radius: f32,
+        border_width: f32,
+    ) {
+        self.rectangles.push(Rectangle {
+            pos: [x, y],
+            size: [width, height],
+        });
+    }
 
+    fn draw_text(&mut self, x: f32, y: f32, width: f32, height: f32, text: &str) {
+        self.text_boxes.push(Text::new(
+            text.to_string(),
+            Rectangle {
+                pos: [x, y],
+                size: [width, height],
+            },
+        ));
+    }
+}
+
+fn main() -> Result<(), Box<dyn Error>> {
     unsafe {
         let event_loop = EventLoop::new()?;
         let window = event_loop.create_window(WindowAttributes::new())?;
 
         let mut renderer = Renderer::new(&window)?;
+
+        let mut counter = static_ui::Counter::new();
+
+        let mut mouse_x = 0.0;
+        let mut mouse_y = 0.0;
 
         event_loop
             .run(|event, elwp| {
@@ -1569,6 +1610,9 @@ fn main() -> Result<(), Box<dyn Error>> {
                         event: WindowEvent::RedrawRequested,
                         ..
                     } => {
+                        renderer.rectangles.clear();
+                        renderer.text_boxes.clear();
+                        counter.draw(&mut renderer);
                         renderer.draw_frame().unwrap();
                     }
                     Event::WindowEvent {
@@ -1576,6 +1620,20 @@ fn main() -> Result<(), Box<dyn Error>> {
                         ..
                     } => {
                         renderer.recreate_swapchain(&window).unwrap();
+                    }
+                    Event::WindowEvent {
+                        event: WindowEvent::CursorMoved { position, .. },
+                        ..
+                    } => {
+                        mouse_x = position.x as f32;
+                        mouse_y = position.y as f32;
+                    }
+                    Event::WindowEvent {
+                        event: WindowEvent::MouseInput { state, button, .. },
+                        ..
+                    } => {
+                        counter.click(mouse_x, mouse_y);
+                        window.request_redraw();
                     }
                     _ => (),
                 }
