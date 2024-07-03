@@ -18,6 +18,7 @@ use ash::vk::DescriptorSetLayoutBinding;
 use ash::vk::DescriptorType;
 use ash::vk::PipelineVertexInputStateCreateInfo;
 use ash::vk::ShaderStageFlags;
+use cosmic_text::ttf_parser::head;
 use static_ui::Component;
 
 use winit::event::ElementState;
@@ -36,8 +37,10 @@ mod static_ui;
 // mod ui;
 
 struct Renderer {
+    entry: ash::Entry,
     instance: ash::Instance,
     device: ash::Device,
+    physical_device: vk::PhysicalDevice,
     present_queue: vk::Queue,
     command_pool: vk::CommandPool,
     draw_command_buffer: vk::CommandBuffer,
@@ -52,8 +55,7 @@ struct Renderer {
     draw_commands_reuse_fence: vk::Fence,
     present_complete_semaphore: vk::Semaphore,
     rendering_complete_semaphore: vk::Semaphore,
-    rectangles: Vec<Rectangle>,
-    text_boxes: Vec<Text>,
+    rectangles: Vec<RenderedRectangle>,
     surface: vk::SurfaceKHR,
     surface_loader: surface::Instance,
     surface_format: vk::SurfaceFormatKHR,
@@ -74,7 +76,7 @@ struct ViewportSize {
     height: f32,
 }
 
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Debug)]
 struct Rectangle {
     pos: [f32; 2],
     size: [f32; 2],
@@ -105,6 +107,7 @@ impl Text {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
 struct CachedGlyph {
     left: i32,
     top: i32,
@@ -237,6 +240,8 @@ impl Atlas {
 
             let submit_infos = [vk::SubmitInfo::default().command_buffers(&buffers_to_submit)];
 
+            println!("submitting upload");
+
             device
                 .queue_submit(queue, &submit_infos, vk::Fence::null())
                 .expect("Failed to Queue Submit!");
@@ -244,6 +249,7 @@ impl Atlas {
                 .queue_wait_idle(queue)
                 .expect("Failed to wait Queue idle!");
             device.free_command_buffers(command_pool, &buffers_to_submit);
+            println!("done upload");
 
             self.current_texture_layout = vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL;
         }
@@ -386,9 +392,10 @@ fn create_buffer(
 impl Renderer {
     fn new(window: &window::Window) -> Result<Self, Box<dyn Error>> {
         unsafe {
-            let entry = ash::Entry::linked();
+            // let entry = ash::Entry::load_from("C:/Users/tbuli/Downloads/vulkan-1.dll").unwrap();
+            let entry = ash::Entry::load().unwrap();
 
-            let instance = unsafe {
+            let (entry, instance) = unsafe {
                 let app_info =
                     vk::ApplicationInfo::default().api_version(vk::make_api_version(0, 1, 3, 0));
 
@@ -402,6 +409,7 @@ impl Renderer {
                         ))
                         .collect::<Vec<_>>();
 
+                // let layer_names = [b"VK_LAYER_KHRONOS_validation\0".as_ptr() as *const _];
                 let layer_names = [b"VK_LAYER_KHRONOS_validation\0".as_ptr() as *const _];
 
                 let create_info = vk::InstanceCreateInfo::default()
@@ -413,7 +421,7 @@ impl Renderer {
                     .create_instance(&create_info, None)
                     .expect("Instance creation error");
 
-                instance
+                (entry, instance)
             };
 
             let debug_info = vk::DebugUtilsMessengerCreateInfoEXT::default()
@@ -506,6 +514,8 @@ impl Renderer {
                 .get_physical_device_surface_formats(physical_device, surface)
                 .unwrap()[0];
 
+            eprintln!("{:?}", surface_format);
+
             let surface_capabilities = surface_loader
                 .get_physical_device_surface_capabilities(physical_device, surface)
                 .unwrap();
@@ -536,6 +546,8 @@ impl Renderer {
                     .get_physical_device_surface_present_modes(physical_device, surface)
                     .unwrap()
             };
+
+            println!("{:?}", present_modes);
 
             let present_mode = present_modes
                 .iter()
@@ -664,21 +676,7 @@ impl Renderer {
                 })
                 .collect();
 
-            let rectangles = [
-                Rectangle {
-                    pos: [100.0, 100.0],
-                    size: [100.0, 100.0],
-                },
-                Rectangle {
-                    pos: [150.0, 150.0],
-                    size: [100.0, 100.0],
-                },
-                Rectangle {
-                    pos: [300.0, 300.0],
-                    size: [100.0, 100.0],
-                },
-            ]
-            .to_vec();
+            let rectangles = vec![];
 
             let text_boxes = vec![
                 Text::new(
@@ -961,8 +959,10 @@ impl Renderer {
             let swash_cache = cosmic_text::SwashCache::new();
 
             Ok(Self {
+                entry,
                 instance,
                 device,
+                physical_device,
                 surface,
                 surface_loader,
                 present_queue,
@@ -979,7 +979,6 @@ impl Renderer {
                 present_complete_semaphore,
                 rendering_complete_semaphore,
                 rectangles,
-                text_boxes,
                 fragment_shader_module,
                 vertex_shader_module,
                 desired_image_count,
@@ -1005,162 +1004,6 @@ impl Renderer {
 
     fn draw_frame(&mut self) -> Result<(), Box<dyn Error>> {
         unsafe {
-            let mut rects: Vec<_> = self
-                .text_boxes
-                .iter_mut()
-                .flat_map(|text_box| {
-                    let text_buffer = text_box.text_buffer.get_or_insert_with(|| {
-                        let mut buffer = cosmic_text::Buffer::new(
-                            &mut self.font_system,
-                            cosmic_text::Metrics::new(48.0, 20.0),
-                        );
-                        buffer.set_size(
-                            &mut self.font_system,
-                            Some(text_box.bounds.size[0]),
-                            Some(text_box.bounds.size[1]),
-                        );
-                        buffer.set_text(
-                            &mut self.font_system,
-                            &text_box.value,
-                            cosmic_text::Attrs::new().family(cosmic_text::Family::Name("Arial")),
-                            cosmic_text::Shaping::Advanced,
-                        );
-                        buffer.shape_until_scroll(&mut self.font_system, true);
-                        buffer
-                    });
-
-                    let mut glyph_rects = Vec::<RenderedRectangle>::new();
-
-                    for run in text_buffer.layout_runs() {
-                        for glyph in run.glyphs.iter() {
-                            let physical_glyph = glyph.physical((0.0, 0.0), 1.0);
-
-                            if let Some(glyph_rect) =
-                                self.atlas.glyph_cache.get(&physical_glyph.cache_key)
-                            {
-                                // println!(
-                                //     "cached {} {} {}",
-                                //     text_box.bounds.pos[0], physical_glyph.x, glyph_rect.left
-                                // );
-                                glyph_rects.push(RenderedRectangle {
-                                    tex_blend: 1.0,
-                                    pos: [
-                                        text_box.bounds.pos[0]
-                                            + physical_glyph.x as f32
-                                            + glyph_rect.left as f32,
-                                        text_box.bounds.pos[1]
-                                            - physical_glyph.y as f32
-                                            - glyph_rect.top as f32
-                                            + text_box.bounds.size[1],
-                                    ],
-                                    size: glyph_rect.tex_location.size,
-                                    tex_coords: glyph_rect.tex_location.pos,
-                                });
-                                continue;
-                            }
-
-                            let Some(image) = self.swash_cache.get_image_uncached(
-                                &mut self.font_system,
-                                physical_glyph.cache_key,
-                            ) else {
-                                continue;
-                            };
-
-                            if image.data.len() == 0 {
-                                continue;
-                            }
-
-                            let upload_buffer = self.atlas.upload_buffer;
-                            if (upload_buffer.size as usize) < image.data.len() {
-                                panic!(
-                                    "Upload buffer too small {} < {}",
-                                    upload_buffer.size,
-                                    image.data.len()
-                                );
-                            }
-
-                            upload_buffer.copy_from_slice(&self.device, &image.data);
-
-                            println!(
-                                "allocating {}x{}",
-                                image.placement.width, image.placement.height
-                            );
-
-                            let tex_glyph_rect = self
-                                .atlas
-                                .allocator
-                                .allocate(etagere::size2(
-                                    image.placement.width as i32,
-                                    image.placement.height as i32,
-                                ))
-                                .unwrap();
-
-                            self.atlas.upload(
-                                &self.device,
-                                self.command_pool,
-                                self.present_queue,
-                                [
-                                    tex_glyph_rect.rectangle.min.x as u32,
-                                    tex_glyph_rect.rectangle.min.y as u32,
-                                ],
-                                [image.placement.width, image.placement.height],
-                            );
-
-                            self.atlas.glyph_cache.insert(
-                                physical_glyph.cache_key,
-                                CachedGlyph {
-                                    left: image.placement.left,
-                                    top: image.placement.top,
-                                    tex_location: Rectangle {
-                                        pos: [
-                                            tex_glyph_rect.rectangle.min.x as f32,
-                                            tex_glyph_rect.rectangle.min.y as f32,
-                                        ],
-                                        size: [
-                                            image.placement.width as f32,
-                                            image.placement.height as f32,
-                                        ],
-                                    },
-                                },
-                            );
-
-                            glyph_rects.push(RenderedRectangle {
-                                tex_blend: 1.0,
-                                pos: [
-                                    text_box.bounds.pos[0]
-                                        + physical_glyph.x as f32
-                                        + image.placement.left as f32,
-                                    text_box.bounds.pos[1]
-                                        - physical_glyph.y as f32
-                                        - image.placement.top as f32
-                                        + text_box.bounds.size[1],
-                                ],
-                                size: [image.placement.width as f32, image.placement.height as f32],
-                                tex_coords: [
-                                    tex_glyph_rect.rectangle.min.x as f32,
-                                    tex_glyph_rect.rectangle.min.y as f32,
-                                ],
-                            });
-                        }
-                        break;
-                    }
-
-                    glyph_rects.into_iter()
-                })
-                .collect();
-
-            let rects: Vec<_> = self
-                .rectangles
-                .iter()
-                .map(|rect| RenderedRectangle {
-                    tex_blend: 0.0,
-                    pos: [rect.pos[0], rect.pos[1]],
-                    size: [rect.size[0], rect.size[1]],
-                    tex_coords: [0.0, 0.0],
-                })
-                .chain(rects.into_iter())
-                .collect();
-
             let (present_index, _) = self
                 .swapchain_stuff
                 .swapchain_loader
@@ -1193,7 +1036,7 @@ impl Renderer {
             );
 
             self.instance_input_buffers[present_index as usize]
-                .copy_from_slice(&self.device, &rects);
+                .copy_from_slice(&self.device, &self.rectangles);
 
             record_submit_commandbuffer(
                 &self.device,
@@ -1235,8 +1078,7 @@ impl Renderer {
                         &self.swapchain_stuff.viewports,
                     );
                     device.cmd_set_scissor(draw_command_buffer, 0, &self.swapchain_stuff.scissors);
-                    device.cmd_draw(draw_command_buffer, 6, rects.len() as u32, 0, 0);
-                    // eprintln!("Drawing {:#?}", &text_rects);
+                    device.cmd_draw(draw_command_buffer, 6, self.rectangles.len() as u32, 0, 0);
                     device.cmd_end_render_pass(draw_command_buffer);
                 },
             );
@@ -1260,6 +1102,17 @@ impl Renderer {
     fn recreate_swapchain(&mut self, window: &window::Window) -> Result<(), Box<dyn Error>> {
         unsafe {
             self.device.device_wait_idle().unwrap();
+
+            eprintln!("loader?");
+
+            // self.surface_loader = surface::Instance::new(&self.e, &self.instance);
+
+            let surface_format = self
+                .surface_loader
+                .get_physical_device_surface_formats(self.physical_device, self.surface)
+                .unwrap()[0];
+
+            eprintln!("{:?}", surface_format);
 
             let [width, height]: [u32; 2] = window.inner_size().into();
 
@@ -1487,11 +1340,14 @@ unsafe fn create_swapchain(
         .clipped(true)
         .image_array_layers(1);
 
+    println!("creating");
+
     let swapchain = loader
         .create_swapchain(&swapchain_create_info, None)
         .unwrap();
 
     let present_images = loader.get_swapchain_images(swapchain).unwrap();
+    println!("getting present images");
     let present_image_views: Vec<vk::ImageView> = present_images
         .iter()
         .map(|&image| {
@@ -1512,9 +1368,12 @@ unsafe fn create_swapchain(
                     layer_count: 1,
                 })
                 .image(image);
+            println!("creating image views");
             device.create_image_view(&create_view_info, None).unwrap()
         })
         .collect();
+
+    println!("swapchain created");
 
     (swapchain, present_images, present_image_views)
 }
@@ -1557,20 +1416,98 @@ impl static_ui::Runtime for Renderer {
         corner_radius: f32,
         border_width: f32,
     ) {
-        self.rectangles.push(Rectangle {
+        eprintln!("{} {} {} x {}", x, y, width, height);
+        self.rectangles.push(RenderedRectangle {
             pos: [x, y],
             size: [width, height],
+            tex_coords: [0.0, 0.0],
+            tex_blend: 0.0,
         });
     }
 
-    fn draw_text(&mut self, x: f32, y: f32, width: f32, height: f32, text: &str) {
-        self.text_boxes.push(Text::new(
-            text.to_string(),
-            Rectangle {
-                pos: [x, y],
-                size: [width, height],
+    fn draw_glyph(&mut self, x: f32, y: f32, size: [f32; 2], tex_coords: [f32; 2]) {
+        eprintln!("{} {} {} x {}", x, y, size[0], size[1]);
+        self.rectangles.push(RenderedRectangle {
+            pos: [x, y],
+            size: size,
+            tex_coords,
+            tex_blend: 1.0,
+        })
+    }
+
+    fn font_system(&mut self) -> &mut cosmic_text::FontSystem {
+        &mut self.font_system
+    }
+
+    fn get_glyph(&mut self, key: cosmic_text::CacheKey) -> Option<CachedGlyph> {
+        if let Some(glyph) = self.atlas.glyph_cache.get(&key) {
+            return Some(*glyph);
+        }
+
+        let Some(image) = self
+            .swash_cache
+            .get_image_uncached(&mut self.font_system, key)
+        else {
+            println!("No glyph");
+            return None;
+        };
+
+        if image.data.len() == 0 {
+            println!("No data");
+            return None;
+        }
+
+        let upload_buffer = self.atlas.upload_buffer;
+        if (upload_buffer.size as usize) < image.data.len() {
+            panic!(
+                "Upload buffer too small {} < {}",
+                upload_buffer.size,
+                image.data.len()
+            );
+        }
+
+        upload_buffer.copy_from_slice(&self.device, &image.data);
+
+        println!(
+            "allocating {}x{}",
+            image.placement.width, image.placement.height
+        );
+
+        let tex_glyph_rect = self
+            .atlas
+            .allocator
+            .allocate(etagere::size2(
+                image.placement.width as i32,
+                image.placement.height as i32,
+            ))
+            .unwrap();
+
+        self.atlas.upload(
+            &self.device,
+            self.command_pool,
+            self.present_queue,
+            [
+                tex_glyph_rect.rectangle.min.x as u32,
+                tex_glyph_rect.rectangle.min.y as u32,
+            ],
+            [image.placement.width, image.placement.height],
+        );
+
+        let glyph = CachedGlyph {
+            left: image.placement.left,
+            top: image.placement.top,
+            tex_location: Rectangle {
+                pos: [
+                    tex_glyph_rect.rectangle.min.x as f32,
+                    tex_glyph_rect.rectangle.min.y as f32,
+                ],
+                size: [image.placement.width as f32, image.placement.height as f32],
             },
-        ));
+        };
+
+        self.atlas.glyph_cache.insert(key, glyph);
+
+        Some(glyph)
     }
 }
 
@@ -1581,7 +1518,15 @@ fn main() -> Result<(), Box<dyn Error>> {
 
         let mut renderer = Renderer::new(&window)?;
 
-        let mut counter = static_ui::Counter::new();
+        let mut counter = static_ui::Counter::new(
+            static_ui::Rect {
+                x: 0.0,
+                y: 0.0,
+                width: window.inner_size().width as f32,
+                height: window.inner_size().height as f32,
+            },
+            &mut renderer,
+        );
 
         let mut mouse_x = 0.0;
         let mut mouse_y = 0.0;
@@ -1611,7 +1556,6 @@ fn main() -> Result<(), Box<dyn Error>> {
                         ..
                     } => {
                         renderer.rectangles.clear();
-                        renderer.text_boxes.clear();
                         counter.draw(&mut renderer);
                         renderer.draw_frame().unwrap();
                     }
@@ -1620,6 +1564,15 @@ fn main() -> Result<(), Box<dyn Error>> {
                         ..
                     } => {
                         renderer.recreate_swapchain(&window).unwrap();
+                        counter.set_bounds(
+                            static_ui::Rect {
+                                x: 0.0,
+                                y: 0.0,
+                                width: window.inner_size().width as f32,
+                                height: window.inner_size().height as f32,
+                            },
+                            &mut renderer,
+                        );
                     }
                     Event::WindowEvent {
                         event: WindowEvent::CursorMoved { position, .. },

@@ -36,12 +36,13 @@ void main() {
     vec4 blue = vec4(0.0, 0.0, 1.0, 1.0);
     
     float inner = 1.0 - adjusted_coeff - coeff;
-    vec4 rect_color = clear * coeff + red * inner + green * adjusted_coeff;
+    // vec4 rect_color = clear * coeff + red * inner + green * adjusted_coeff;
     // vec4 rect_color = clear * border_coeff + red * (1.0 - border_coeff);
-    // vec4 rect_color = red;
+    vec4 rect_color = red;
     
     float tex_alpha = textureLod(tex, (rect.tex_coords + rect.pos), 0).r;
-    vec4 tex_color = mix(clear, blue, tex_alpha);
+    // vec4 tex_color = mix(clear, blue, tex_alpha);
+    vec4 tex_color = mix(green, blue, tex_alpha);
 
     outColor = mix(rect_color, tex_color, rect.tex_blend);
     
