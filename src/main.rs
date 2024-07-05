@@ -19,6 +19,7 @@ use ash::vk::DescriptorType;
 use ash::vk::PipelineVertexInputStateCreateInfo;
 use ash::vk::ShaderStageFlags;
 use cosmic_text::ttf_parser::head;
+use static_ui::Color;
 use static_ui::Component;
 
 use winit::event::ElementState;
@@ -89,29 +90,18 @@ struct RenderedRectangle {
     size: [f32; 2],
     tex_coords: [f32; 2],
     tex_blend: f32,
-}
-
-struct Text {
-    value: String,
-    bounds: Rectangle,
-    text_buffer: Option<cosmic_text::Buffer>,
-}
-
-impl Text {
-    fn new(value: String, bounds: Rectangle) -> Self {
-        Self {
-            value,
-            text_buffer: None,
-            bounds,
-        }
-    }
+    bg_color: Color,
+    border_color: Color,
+    border_width: f32,
+    corner_radius: f32,
 }
 
 #[derive(Clone, Copy, Debug)]
 struct CachedGlyph {
-    left: i32,
-    top: i32,
-    tex_location: Rectangle,
+    left: f32,
+    top: f32,
+    size: [f32; 2],
+    tex_position: Option<[f32; 2]>,
 }
 
 struct Atlas {
@@ -514,8 +504,6 @@ impl Renderer {
                 .get_physical_device_surface_formats(physical_device, surface)
                 .unwrap()[0];
 
-            eprintln!("{:?}", surface_format);
-
             let surface_capabilities = surface_loader
                 .get_physical_device_surface_capabilities(physical_device, surface)
                 .unwrap();
@@ -678,23 +666,6 @@ impl Renderer {
 
             let rectangles = vec![];
 
-            let text_boxes = vec![
-                Text::new(
-                    "Hello World".to_string(),
-                    Rectangle {
-                        pos: [300.0, 300.0],
-                        size: [600.0, 200.0],
-                    },
-                ),
-                Text::new(
-                    "Hello World2".to_string(),
-                    Rectangle {
-                        pos: [300.0, 500.0],
-                        size: [600.0, 200.0],
-                    },
-                ),
-            ];
-
             let uniform_buffers: Vec<Buffer> = present_images
                 .iter()
                 .map(|_| {
@@ -803,6 +774,30 @@ impl Renderer {
                     binding: 0,
                     format: vk::Format::R32_SFLOAT,
                     offset: offset_of!(RenderedRectangle, tex_blend) as u32,
+                },
+                vk::VertexInputAttributeDescription {
+                    location: 4,
+                    binding: 0,
+                    format: vk::Format::R32G32B32A32_SFLOAT,
+                    offset: offset_of!(RenderedRectangle, bg_color) as u32,
+                },
+                vk::VertexInputAttributeDescription {
+                    location: 5,
+                    binding: 0,
+                    format: vk::Format::R32G32B32A32_SFLOAT,
+                    offset: offset_of!(RenderedRectangle, border_color) as u32,
+                },
+                vk::VertexInputAttributeDescription {
+                    location: 6,
+                    binding: 0,
+                    format: vk::Format::R32_SFLOAT,
+                    offset: offset_of!(RenderedRectangle, border_width) as u32,
+                },
+                vk::VertexInputAttributeDescription {
+                    location: 7,
+                    binding: 0,
+                    format: vk::Format::R32_SFLOAT,
+                    offset: offset_of!(RenderedRectangle, corner_radius) as u32,
                 },
             ];
 
@@ -1103,16 +1098,10 @@ impl Renderer {
         unsafe {
             self.device.device_wait_idle().unwrap();
 
-            eprintln!("loader?");
-
-            // self.surface_loader = surface::Instance::new(&self.e, &self.instance);
-
             let surface_format = self
                 .surface_loader
                 .get_physical_device_surface_formats(self.physical_device, self.surface)
                 .unwrap()[0];
-
-            eprintln!("{:?}", surface_format);
 
             let [width, height]: [u32; 2] = window.inner_size().into();
 
@@ -1415,23 +1404,31 @@ impl static_ui::Runtime for Renderer {
         height: f32,
         corner_radius: f32,
         border_width: f32,
+        bg_color: Color,
+        border_color: Color,
     ) {
-        eprintln!("{} {} {} x {}", x, y, width, height);
         self.rectangles.push(RenderedRectangle {
             pos: [x, y],
             size: [width, height],
             tex_coords: [0.0, 0.0],
             tex_blend: 0.0,
+            bg_color,
+            border_color,
+            border_width,
+            corner_radius,
         });
     }
 
-    fn draw_glyph(&mut self, x: f32, y: f32, size: [f32; 2], tex_coords: [f32; 2]) {
-        eprintln!("{} {} {} x {}", x, y, size[0], size[1]);
+    fn draw_glyph(&mut self, x: f32, y: f32, size: [f32; 2], tex_coords: [f32; 2], color: Color) {
         self.rectangles.push(RenderedRectangle {
             pos: [x, y],
             size: size,
             tex_coords,
             tex_blend: 1.0,
+            bg_color: color,
+            border_color: Color::clear(),
+            border_width: 0.0,
+            corner_radius: 0.0,
         })
     }
 
@@ -1452,9 +1449,15 @@ impl static_ui::Runtime for Renderer {
             return None;
         };
 
+        let mut glyph = CachedGlyph {
+            left: image.placement.left as f32,
+            top: image.placement.top as f32,
+            size: [image.placement.width as f32, image.placement.height as f32],
+            tex_position: None,
+        };
+
         if image.data.len() == 0 {
-            println!("No data");
-            return None;
+            return Some(glyph);
         }
 
         let upload_buffer = self.atlas.upload_buffer;
@@ -1493,17 +1496,10 @@ impl static_ui::Runtime for Renderer {
             [image.placement.width, image.placement.height],
         );
 
-        let glyph = CachedGlyph {
-            left: image.placement.left,
-            top: image.placement.top,
-            tex_location: Rectangle {
-                pos: [
-                    tex_glyph_rect.rectangle.min.x as f32,
-                    tex_glyph_rect.rectangle.min.y as f32,
-                ],
-                size: [image.placement.width as f32, image.placement.height as f32],
-            },
-        };
+        glyph.tex_position = Some([
+            tex_glyph_rect.rectangle.min.x as f32,
+            tex_glyph_rect.rectangle.min.y as f32,
+        ]);
 
         self.atlas.glyph_cache.insert(key, glyph);
 
@@ -1518,10 +1514,8 @@ fn main() -> Result<(), Box<dyn Error>> {
 
         let mut renderer = Renderer::new(&window)?;
 
-        let mut counter = static_ui::Counter::new(
-            static_ui::Rect {
-                x: 0.0,
-                y: 0.0,
+        let mut app_ui = static_ui::App::new(
+            static_ui::Size {
                 width: window.inner_size().width as f32,
                 height: window.inner_size().height as f32,
             },
@@ -1533,7 +1527,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
         event_loop
             .run(|event, elwp| {
-                elwp.set_control_flow(ControlFlow::Poll);
+                elwp.set_control_flow(ControlFlow::Wait);
                 match event {
                     Event::WindowEvent {
                         event:
@@ -1556,7 +1550,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                         ..
                     } => {
                         renderer.rectangles.clear();
-                        counter.draw(&mut renderer);
+                        app_ui.draw(static_ui::Point { x: 0.0, y: 0.0 }, &mut renderer);
                         renderer.draw_frame().unwrap();
                     }
                     Event::WindowEvent {
@@ -1564,10 +1558,8 @@ fn main() -> Result<(), Box<dyn Error>> {
                         ..
                     } => {
                         renderer.recreate_swapchain(&window).unwrap();
-                        counter.set_bounds(
-                            static_ui::Rect {
-                                x: 0.0,
-                                y: 0.0,
+                        app_ui.set_bounds(
+                            static_ui::Size {
                                 width: window.inner_size().width as f32,
                                 height: window.inner_size().height as f32,
                             },
@@ -1585,8 +1577,25 @@ fn main() -> Result<(), Box<dyn Error>> {
                         event: WindowEvent::MouseInput { state, button, .. },
                         ..
                     } => {
-                        counter.click(mouse_x, mouse_y);
+                        app_ui.click(
+                            static_ui::Point {
+                                x: mouse_x,
+                                y: mouse_y,
+                            },
+                            &mut renderer,
+                        );
                         window.request_redraw();
+                    }
+                    Event::WindowEvent {
+                        event: WindowEvent::KeyboardInput { event, .. },
+                        ..
+                    } => {
+                        eprintln!("{:?}", event);
+                        if let Some(text) = event.text {
+                            eprintln!("textn {}", &text);
+                            app_ui.key_pressed(text, &mut renderer);
+                            window.request_redraw();
+                        }
                     }
                     _ => (),
                 }
