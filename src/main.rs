@@ -34,6 +34,7 @@ use winit::raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 use winit::window;
 use winit::window::WindowAttributes;
 
+mod gen_ref;
 mod static_ui;
 // mod ui;
 
@@ -1570,20 +1571,39 @@ fn main() -> Result<(), Box<dyn Error>> {
                         event: WindowEvent::CursorMoved { position, .. },
                         ..
                     } => {
+                        app_ui.mouse_move(
+                            position.x as f32 - mouse_x,
+                            position.y as f32 - mouse_y,
+                            &mut renderer,
+                        );
                         mouse_x = position.x as f32;
                         mouse_y = position.y as f32;
+                        window.request_redraw();
                     }
                     Event::WindowEvent {
                         event: WindowEvent::MouseInput { state, button, .. },
                         ..
                     } => {
-                        app_ui.click(
-                            static_ui::Point {
-                                x: mouse_x,
-                                y: mouse_y,
-                            },
-                            &mut renderer,
-                        );
+                        match state {
+                            ElementState::Pressed => {
+                                app_ui.click(
+                                    static_ui::Point {
+                                        x: mouse_x,
+                                        y: mouse_y,
+                                    },
+                                    &mut renderer,
+                                );
+                            }
+                            ElementState::Released => {
+                                app_ui.mouse_up(
+                                    static_ui::Point {
+                                        x: mouse_x,
+                                        y: mouse_y,
+                                    },
+                                    &mut renderer,
+                                );
+                            }
+                        }
                         window.request_redraw();
                     }
                     Event::WindowEvent {
@@ -1593,7 +1613,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                         eprintln!("{:?}", event);
                         if let Some(text) = event.text {
                             eprintln!("textn {}", &text);
-                            app_ui.key_pressed(text, &mut renderer);
+                            app_ui.key_pressed(&text, &mut renderer);
                             window.request_redraw();
                         }
                     }

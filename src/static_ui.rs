@@ -1,6 +1,7 @@
-use ash::sec;
-use cosmic_text::{Attrs, AttrsList, BufferRef, Edit};
-use winit::keyboard::SmolStr;
+use cosmic_text::{Attrs, AttrsList};
+use rows::Rows;
+
+mod rows;
 
 use crate::CachedGlyph;
 
@@ -155,6 +156,9 @@ impl Component for Text {
     fn click(&mut self, _: Point, _: &mut dyn Runtime) -> bool {
         return false;
     }
+
+    fn mouse_up(&mut self, _: Point, _: &mut dyn Runtime) {}
+    fn mouse_move(&mut self, _: f32, _: f32, _: &mut dyn Runtime) {}
 
     fn draw(&mut self, point: Point, rt: &mut dyn Runtime) {
         let end_y_offset =
@@ -348,11 +352,14 @@ impl Component for Input {
         true
     }
 
+    fn mouse_up(&mut self, _: Point, _: &mut dyn Runtime) {}
+    fn mouse_move(&mut self, _: f32, _: f32, _: &mut dyn Runtime) {}
+
     fn set_bounds(&mut self, bounds: Size, rt: &mut dyn Runtime) {
         self.size = bounds;
     }
 
-    fn key_pressed(&mut self, key: SmolStr, rt: &mut dyn Runtime) {
+    fn key_pressed(&mut self, key: &str, rt: &mut dyn Runtime) {
         let Some(cursor) = self.cursor else {
             return;
         };
@@ -432,7 +439,9 @@ pub trait Component {
     fn set_bounds(&mut self, bounds: Size, rt: &mut dyn Runtime);
     fn size(&self) -> Size;
     fn click(&mut self, point: Point, rt: &mut dyn Runtime) -> bool;
-    fn key_pressed(&mut self, key: SmolStr, rt: &mut dyn Runtime) {}
+    fn mouse_up(&mut self, point: Point, rt: &mut dyn Runtime);
+    fn mouse_move(&mut self, dx: f32, dy: f32, rt: &mut dyn Runtime);
+    fn key_pressed(&mut self, key: &str, rt: &mut dyn Runtime) {}
 }
 
 enum Sizing {
@@ -484,18 +493,8 @@ impl Component for Button {
             self.size.height,
             10.0,
             2.0,
-            Color {
-                r: 1.0,
-                g: 0.0,
-                b: 0.0,
-                a: 1.0,
-            },
-            Color {
-                r: 0.0,
-                g: 1.0,
-                b: 0.0,
-                a: 1.0,
-            },
+            Color::black().red(1.0),
+            Color::black().green(1.0),
         );
 
         self.text.draw(point, rt);
@@ -504,6 +503,9 @@ impl Component for Button {
     fn click(&mut self, point: Point, rt: &mut dyn Runtime) -> bool {
         self.size.contains(point)
     }
+
+    fn mouse_up(&mut self, _: Point, _: &mut dyn Runtime) {}
+    fn mouse_move(&mut self, _: f32, _: f32, _: &mut dyn Runtime) {}
 
     fn set_bounds(&mut self, bounds: Size, rt: &mut dyn Runtime) {
         self.size = Size {
@@ -568,6 +570,41 @@ struct Rect<C> {
     border_color: Color,
 }
 
+impl<C: Component> Rect<C> {
+    pub fn new(inner: C, bounds: Size) -> Self {
+        Self {
+            width: Sizing::Auto,
+            height: Sizing::Auto,
+            size: bounds,
+            inner,
+            border_width: 0.0,
+            corner_radius: 0.0,
+            bg_color: Color::clear(),
+            border_color: Color::clear(),
+        }
+    }
+
+    pub fn full_width(mut self) -> Self {
+        self.width = Sizing::Full;
+        self
+    }
+
+    pub fn full_height(mut self) -> Self {
+        self.height = Sizing::Full;
+        self
+    }
+
+    pub fn px_hight(mut self, height: f32) -> Self {
+        self.height = Sizing::Value(height);
+        self
+    }
+
+    pub fn px_width(mut self, width: f32) -> Self {
+        self.width = Sizing::Value(width);
+        self
+    }
+}
+
 impl<C: Component> Component for Rect<C> {
     fn draw(&mut self, point: Point, rt: &mut dyn Runtime) {
         rt.draw_rect(
@@ -595,14 +632,23 @@ impl<C: Component> Component for Rect<C> {
                 Sizing::Full => bounds.height,
                 Sizing::Value(height) => height,
             }),
-        }
+        };
+        self.inner.set_bounds(self.size, rt);
     }
 
     fn click(&mut self, point: Point, rt: &mut dyn Runtime) -> bool {
         self.inner.click(point, rt)
     }
 
-    fn key_pressed(&mut self, key: SmolStr, rt: &mut dyn Runtime) {
+    fn mouse_up(&mut self, point: Point, rt: &mut dyn Runtime) {
+        self.inner.mouse_up(point, rt)
+    }
+
+    fn mouse_move(&mut self, dx: f32, dy: f32, rt: &mut dyn Runtime) {
+        self.inner.mouse_move(dx, dy, rt)
+    }
+
+    fn key_pressed(&mut self, key: &str, rt: &mut dyn Runtime) {
         self.inner.key_pressed(key, rt)
     }
 
@@ -629,7 +675,15 @@ impl<C: Component> Component for Align<C> {
         }
     }
 
-    fn key_pressed(&mut self, key: SmolStr, rt: &mut dyn Runtime) {
+    fn mouse_up(&mut self, point: Point, rt: &mut dyn Runtime) {
+        self.inner.mouse_up(point, rt)
+    }
+
+    fn mouse_move(&mut self, dx: f32, dy: f32, rt: &mut dyn Runtime) {
+        self.inner.mouse_move(dx, dy, rt)
+    }
+
+    fn key_pressed(&mut self, key: &str, rt: &mut dyn Runtime) {
         self.inner.key_pressed(key, rt)
     }
 
@@ -638,82 +692,188 @@ impl<C: Component> Component for Align<C> {
     }
 }
 
-pub struct App {
-    plus: Align<Button>,
-    minus: Align<Button>,
-    value: u32,
-    value_text: Text,
-    input: Input,
+struct ResizableCols<C1, C2> {
+    col1: C1,
+    col2: C2,
+    spacer_width: f32,
+    col1_width: f32,
+    col2_width: f32,
     height: f32,
+    dragging: bool,
 }
 
-impl Component for App {
+impl<C1: Component, C2: Component> ResizableCols<C1, C2> {
+    fn width(&self) -> f32 {
+        self.col1_width + self.col2_width + self.spacer_width
+    }
+
+    pub fn new(col1: C1, col2: C2, spacer_width: f32, bounds: Size, rt: &mut dyn Runtime) -> Self {
+        let total_width = bounds.width - spacer_width;
+
+        Self {
+            col1,
+            col2,
+            spacer_width,
+            col1_width: total_width / 2.0,
+            col2_width: total_width / 2.0,
+            height: bounds.height,
+            dragging: false,
+        }
+    }
+}
+
+impl<C1: Component, C2: Component> Component for ResizableCols<C1, C2> {
     fn draw(&mut self, point: Point, rt: &mut dyn Runtime) {
-        self.plus.draw(point, rt);
-        self.minus.draw(
+        self.col1.draw(point, rt);
+        rt.draw_rect(
+            point.x + self.col1_width,
+            point.y,
+            self.spacer_width,
+            self.height,
+            0.0,
+            0.0,
+            if self.dragging {
+                Color::black().red(1.0)
+            } else {
+                Color::black().blue(1.0)
+            },
+            Color::clear(),
+        );
+        self.col2.draw(
             Point {
-                x: point.x,
-                y: point.y + self.height / 3.0,
+                x: point.x + self.col1_width + self.spacer_width,
+                y: point.y,
             },
             rt,
         );
-        self.input.draw(
-            Point {
-                x: point.x,
-                y: point.y + 2.0 * self.height / 3.0,
+    }
+
+    fn set_bounds(&mut self, bounds: Size, rt: &mut dyn Runtime) {
+        let old_total_width = self.width() - self.spacer_width;
+        self.height = bounds.height;
+
+        let new_total_width = bounds.width - self.spacer_width;
+
+        let col1_old_fraction = self.col1_width / old_total_width;
+        let col2_old_fraction = self.col2_width / old_total_width;
+        self.col1_width = new_total_width * col1_old_fraction;
+        self.col2_width = new_total_width * col2_old_fraction;
+
+        self.col1.set_bounds(
+            Size {
+                width: self.col1_width,
+                height: self.height,
+            },
+            rt,
+        );
+        self.col2.set_bounds(
+            Size {
+                width: self.col2_width,
+                height: self.height,
             },
             rt,
         );
     }
 
     fn click(&mut self, point: Point, rt: &mut dyn Runtime) -> bool {
-        if self.plus.click(point, rt) {
-            self.value += 1;
-            self.value_text.set_text(self.value.to_string(), rt);
+        if point.x >= 0.0 && point.x <= self.col1_width {
+            return self.col1.click(point, rt);
+        }
+
+        if point.x >= self.col1_width && point.x <= self.col1_width + self.spacer_width {
+            self.dragging = true;
             return true;
         }
 
-        if self.minus.click(
-            Point {
-                x: point.x,
-                y: point.y - self.height / 3.0,
-            },
-            rt,
-        ) {
-            self.value -= 1;
-            self.value_text.set_text(self.value.to_string(), rt);
-            return true;
-        }
-
-        if self.input.click(
-            Point {
-                x: point.x,
-                y: point.y - 2.0 * self.height / 3.0,
-            },
-            rt,
-        ) {
-            return true;
+        if point.x >= self.col1_width + self.spacer_width
+            && point.x <= self.col1_width + self.spacer_width + self.col2_width
+        {
+            return self.col2.click(point, rt);
         }
 
         false
     }
 
-    fn set_bounds(&mut self, bounds: Size, rt: &mut dyn Runtime) {
-        let child_bounds = Size {
-            width: bounds.width,
-            height: bounds.height / 3.0,
-        };
-
-        self.height = bounds.height;
-
-        self.plus.set_bounds(child_bounds, rt);
-        self.minus.set_bounds(child_bounds, rt);
-        self.value_text.set_bounds(child_bounds, rt);
-        self.input.set_bounds(child_bounds, rt);
+    fn mouse_up(&mut self, point: Point, rt: &mut dyn Runtime) {
+        self.dragging = false;
+        self.col1.mouse_up(point, rt);
+        self.col2.mouse_up(point, rt);
     }
 
-    fn key_pressed(&mut self, key: SmolStr, rt: &mut dyn Runtime) {
-        self.input.key_pressed(key, rt);
+    fn mouse_move(&mut self, dx: f32, dy: f32, rt: &mut dyn Runtime) {
+        let mut diff = dx;
+
+        if dx < 0.0 {
+            diff = dx.max(-self.col1_width);
+        }
+
+        if dx > 0.0 {
+            diff = dx.min(self.col2_width);
+        }
+
+        if self.dragging {
+            self.col1_width += diff;
+            self.col2_width -= diff;
+            self.col1.set_bounds(
+                Size {
+                    width: self.col1_width,
+                    height: self.height,
+                },
+                rt,
+            );
+            self.col2.set_bounds(
+                Size {
+                    width: self.col2_width,
+                    height: self.height,
+                },
+                rt,
+            );
+        }
+
+        self.col1.mouse_move(dx, dy, rt);
+        self.col2.mouse_move(dx, dy, rt);
+    }
+
+    fn key_pressed(&mut self, key: &str, rt: &mut dyn Runtime) {
+        self.col1.key_pressed(key, rt);
+        self.col2.key_pressed(key, rt);
+    }
+
+    fn size(&self) -> Size {
+        Size {
+            width: self.width(),
+            height: self.height,
+        }
+    }
+}
+
+pub struct App {
+    columns: ResizableCols<Align<Rows<Rect<Text>>>, Text>,
+}
+
+impl Component for App {
+    fn draw(&mut self, point: Point, rt: &mut dyn Runtime) {
+        self.columns.draw(point, rt);
+    }
+
+    fn click(&mut self, point: Point, rt: &mut dyn Runtime) -> bool {
+        self.columns.click(point, rt)
+    }
+
+    fn mouse_up(&mut self, point: Point, rt: &mut dyn Runtime) {
+        self.columns.mouse_up(point, rt);
+    }
+
+    fn mouse_move(&mut self, dx: f32, dy: f32, rt: &mut dyn Runtime) {
+        self.columns.mouse_move(dx, dy, rt);
+    }
+
+    fn set_bounds(&mut self, bounds: Size, rt: &mut dyn Runtime) {
+        self.columns.set_bounds(bounds, rt);
+    }
+
+    fn key_pressed(&mut self, key: &str, rt: &mut dyn Runtime) {
+        self.columns.key_pressed(key, rt);
     }
 
     fn size(&self) -> Size {
@@ -726,44 +886,62 @@ impl Component for App {
 
 impl App {
     pub fn new(bounds: Size, rt: &mut dyn Runtime) -> Self {
-        let child_bounds = Size {
-            width: bounds.width,
-            height: bounds.height / 3.0,
-        };
-
         Self {
-            plus: Align::new(
-                Button::new(100.0, 100.0, "+1".to_string(), child_bounds, rt),
-                child_bounds,
-            )
-            .center(),
-            minus: Align::new(
-                Button::new(100.0, 100.0, "-1".to_string(), child_bounds, rt),
-                child_bounds,
-            )
-            .center(),
-            input: Input::new(
-                "Input Two".to_string(),
-                child_bounds,
-                Color::black().red(1.0),
+            columns: ResizableCols::new(
+                Align::new(
+                    Rows::new(vec![
+                        Rect::new(
+                            Text::new(
+                                "Text 1".to_string(),
+                                bounds,
+                                Color::black().green(1.0),
+                                Alignment::center(),
+                                rt,
+                            ),
+                            bounds,
+                        )
+                        .px_hight(50.0),
+                        Rect::new(
+                            Text::new(
+                                "Text 2".to_string(),
+                                bounds,
+                                Color::black().green(1.0),
+                                Alignment::center(),
+                                rt,
+                            ),
+                            bounds,
+                        )
+                        .px_hight(50.0),
+                        Rect::new(
+                            Text::new(
+                                "Text 3".to_string(),
+                                bounds,
+                                Color::black().green(1.0),
+                                Alignment::center(),
+                                rt,
+                            ),
+                            bounds,
+                        )
+                        .px_hight(50.0),
+                    ]),
+                    bounds,
+                )
+                .center(),
+                Text::new(
+                    "Some, text with maybe extra lines and stuff".to_string(),
+                    bounds,
+                    Color::black().red(1.0),
+                    Alignment::center(),
+                    rt,
+                ),
+                10.0,
+                bounds,
                 rt,
             ),
-            value: 0,
-            value_text: Text::new(
-                // "Some, text with maybe extra lines and stuff".to_string(),
-                // "Some, text with maybe extra lines and stuffSome, text with maybe extra lines and stuff".to_string(),
-                "0".to_string(),
-                child_bounds,
-                Color {
-                    r: 0.0,
-                    g: 0.0,
-                    b: 1.0,
-                    a: 1.0,
-                },
-                Alignment::center(),
-                rt,
-            ),
-            height: bounds.height,
         }
+    }
+
+    pub fn set_text_list(&mut self, text_list: Vec<String>, rt: &mut dyn Runtime) {
+        // self.columns.col1.inner.
     }
 }
