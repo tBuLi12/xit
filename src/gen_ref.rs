@@ -7,7 +7,8 @@ use std::{
     ptr::{addr_of, addr_of_mut},
 };
 
-pub struct GenRef<T> {
+#[derive(Debug)]
+pub struct GenRef<T: ?Sized> {
     ptr: *mut GenValue<T>,
     gen: u64,
 }
@@ -18,13 +19,13 @@ impl<T> Deref for GenRefGuard<T> {
     type Target = T;
 
     fn deref(&self) -> &Self::Target {
-        unsafe { &*addr_of!((*self.0.ptr).value) }
+        unsafe { &*addr_of!((*self.0.ptr).inner.value) }
     }
 }
 
 impl<T> Drop for GenRefGuard<T> {
     fn drop(&mut self) {
-        unsafe { *addr_of_mut!((*self.0.ptr).borrows) -= 1 };
+        unsafe { *addr_of_mut!((*self.0.ptr).inner.borrows) -= 1 };
     }
 }
 
@@ -34,19 +35,19 @@ impl<T> Deref for GenRefMutGuard<T> {
     type Target = T;
 
     fn deref(&self) -> &Self::Target {
-        unsafe { &*addr_of!((*self.0.ptr).value) }
+        unsafe { &*addr_of!((*self.0.ptr).inner.value) }
     }
 }
 
 impl<T> DerefMut for GenRefMutGuard<T> {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        unsafe { &mut *addr_of_mut!((*self.0.ptr).value) }
+        unsafe { &mut *addr_of_mut!((*self.0.ptr).inner.value) }
     }
 }
 
 impl<T> Drop for GenRefMutGuard<T> {
     fn drop(&mut self) {
-        unsafe { *addr_of_mut!((*self.0.ptr).mut_borrows) -= 1 };
+        unsafe { *addr_of_mut!((*self.0.ptr).inner.mut_borrow) = false };
     }
 }
 
@@ -61,8 +62,8 @@ impl<T> GenRef<T> {
 
     pub fn try_get(self) -> Option<GenRefGuard<T>> {
         let current = unsafe { *addr_of!((*self.ptr).gen) };
-        if current == self.gen && unsafe { *addr_of!((*self.ptr).mut_borrows) } == 0 {
-            unsafe { *addr_of_mut!((*self.ptr).borrows) += 1 };
+        if current == self.gen && !unsafe { *addr_of!((*self.ptr).inner.mut_borrow) } {
+            unsafe { *addr_of_mut!((*self.ptr).inner.borrows) += 1 };
             Some(GenRefGuard(self))
         } else {
             None
@@ -81,10 +82,11 @@ impl<T> GenRef<T> {
         let current = unsafe { *addr_of!((*self.ptr).gen) };
         if current == self.gen
             && unsafe {
-                *addr_of!((*self.ptr).borrows) == 0 && *addr_of!((*self.ptr).mut_borrows) == 0
+                *addr_of!((*self.ptr).inner.borrows) == 0
+                    && !*addr_of!((*self.ptr).inner.mut_borrow)
             }
         {
-            unsafe { *addr_of_mut!((*self.ptr).mut_borrows) += 1 };
+            unsafe { *addr_of_mut!((*self.ptr).inner.mut_borrow) = true };
             Some(GenRefMutGuard(self))
         } else {
             None
@@ -102,6 +104,7 @@ impl<T> Clone for GenRef<T> {
     }
 }
 
+#[derive(Debug)]
 pub struct GenBox<T> {
     ptr: *mut GenValue<T>,
     _marker: PhantomData<T>,
@@ -117,7 +120,7 @@ impl<T> GenBox<T> {
     pub fn new(value: T) -> Self {
         let ptr = GEN_REF_STORAGE.with_borrow_mut(|storage| storage.alloc::<T>());
         unsafe {
-            addr_of_mut!((*ptr).value).write(value);
+            addr_of_mut!((*ptr).inner.value).write(value);
         };
 
         GenBox {
@@ -138,20 +141,29 @@ impl<T> GenBox<T> {
 
 impl<T> Drop for GenBox<T> {
     fn drop(&mut self) {
-        if unsafe { *addr_of!((*self.ptr).borrows) } > 0
-            || unsafe { *addr_of!((*self.ptr).mut_borrows) } > 0
+        if unsafe { *addr_of!((*self.ptr).inner.borrows) } > 0
+            || unsafe { *addr_of!((*self.ptr).inner.mut_borrow) }
         {
             panic!("OwnedGenRef is still in use");
+        }
+
+        unsafe {
+            addr_of_mut!((*self.ptr).inner.value).drop_in_place();
         }
 
         GEN_REF_STORAGE.with_borrow_mut(|storage| storage.free(self.ptr));
     }
 }
 
-struct GenValue<T> {
+#[repr(C)]
+struct GenValue<T: ?Sized> {
     gen: u64,
+    inner: Value<T>,
+}
+
+struct Value<T: ?Sized> {
     borrows: u32,
-    mut_borrows: u32,
+    mut_borrow: bool,
     value: T,
 }
 
@@ -171,8 +183,8 @@ impl GenRefStorage {
         unsafe {
             let ptr = alloc::alloc(layout) as *mut GenValue<T>;
             addr_of_mut!((*ptr).gen).write(0);
-            addr_of_mut!((*ptr).borrows).write(0);
-            addr_of_mut!((*ptr).mut_borrows).write(0);
+            addr_of_mut!((*ptr).inner.borrows).write(0);
+            addr_of_mut!((*ptr).inner.mut_borrow).write(false);
             ptr
         }
     }

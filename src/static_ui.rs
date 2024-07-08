@@ -72,6 +72,7 @@ pub struct Text {
     size: Size,
     color: Color,
     line_count: usize,
+    text: Signal<String>,
 }
 
 impl Text {
@@ -110,6 +111,7 @@ impl Text {
             alignment,
             color,
             line_count: 0,
+            text: value,
         };
 
         this.layout_text(rt);
@@ -141,7 +143,7 @@ impl Text {
         }
     }
 
-    fn set_text(&mut self, text: String, rt: &mut dyn Runtime) {
+    fn set_text(&mut self, text: &str, rt: &mut dyn Runtime) {
         self.buffer.set_text(
             rt.font_system(),
             &text,
@@ -161,6 +163,10 @@ impl Component for Text {
     fn mouse_move(&mut self, _: f32, _: f32, _: &mut dyn Runtime) {}
 
     fn draw(&mut self, point: Point, rt: &mut dyn Runtime) {
+        if self.text.is_dirty() {
+            self.set_text(&*self.text.borrow(), rt);
+        }
+
         let end_y_offset =
             self.size.height - self.buffer.metrics().line_height * self.line_count as f32;
         let y_offset = match self.alignment.vertical {
@@ -869,6 +875,7 @@ impl<C1: Component, C2: Component> Component for ResizableCols<C1, C2> {
 
 pub struct App {
     columns: ResizableCols<Button, Text>,
+    count: OwnedSignal<u32>,
     text: OwnedSignal<String>,
 }
 
@@ -907,14 +914,17 @@ impl Component for App {
 
 impl App {
     pub fn new(bounds: Size, rt: &mut dyn Runtime) -> Self {
-        let text = OwnedSignal::new("Some, text with maybe extra lines and stuff".to_string());
+        let count = OwnedSignal::new(0);
+        let count_signal = count.get_signal();
+
+        let text = count_signal.derived(|count| format!("Count: {}", count));
         let text_signal = text.get_signal();
 
         Self {
             columns: ResizableCols::new(
                 Button::new(100.0, 50.0, "Text 1".to_string(), bounds, rt).on_click(move || {
                     println!("Text 1 clicked");
-                    text_signal.set("Text 1".to_string());
+                    count_signal.update(|value| *value += 1);
                 }),
                 Text::new(
                     text_signal,
@@ -927,6 +937,7 @@ impl App {
                 bounds,
                 rt,
             ),
+            count,
             text,
         }
     }
