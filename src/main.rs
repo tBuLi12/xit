@@ -35,6 +35,8 @@ use winit::window;
 use winit::window::WindowAttributes;
 
 mod gen_ref;
+mod pin_signal;
+mod signal;
 mod static_ui;
 // mod ui;
 

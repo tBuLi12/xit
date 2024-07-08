@@ -3,7 +3,10 @@ use rows::Rows;
 
 mod rows;
 
-use crate::CachedGlyph;
+use crate::{
+    signal::{OwnedSignal, Signal},
+    CachedGlyph,
+};
 
 #[derive(Copy, Clone, Debug)]
 pub struct Size {
@@ -31,12 +34,6 @@ impl std::ops::Add<Point> for Point {
             y: self.y + rhs.y,
         }
     }
-}
-
-#[derive(Copy, Clone, Debug)]
-pub struct BBox {
-    pub dims: Size,
-    pub pos: Point,
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -79,7 +76,7 @@ pub struct Text {
 
 impl Text {
     fn new(
-        value: String,
+        value: Signal<String>,
         bounds: Size,
         color: Color,
         alignment: Alignment,
@@ -92,12 +89,15 @@ impl Text {
                 line_height: 40.0,
             },
         );
-        buffer.set_text(
-            rt.font_system(),
-            &value,
-            cosmic_text::Attrs::new(),
-            cosmic_text::Shaping::Advanced,
-        );
+        {
+            let value = value.borrow();
+            buffer.set_text(
+                rt.font_system(),
+                &*value,
+                cosmic_text::Attrs::new(),
+                cosmic_text::Shaping::Advanced,
+            );
+        }
         buffer.set_size(rt.font_system(), Some(bounds.width), Some(bounds.height));
 
         buffer.shape_until_scroll(rt.font_system(), false);
@@ -455,6 +455,8 @@ struct Button {
     height: f32,
     size: Size,
     text: Text,
+    text_signal: OwnedSignal<String>,
+    _on_click: Option<Box<dyn FnMut()>>,
 }
 
 impl Button {
@@ -464,10 +466,14 @@ impl Button {
             height: height.min(bounds.height),
         };
 
+        let text_signal = OwnedSignal::new(text);
+        let text = text_signal.get_signal();
+
         Self {
             width,
             height,
             size,
+            text_signal,
             text: Text::new(
                 text,
                 size,
@@ -480,7 +486,13 @@ impl Button {
                 Alignment::center(),
                 rt,
             ),
+            _on_click: None,
         }
+    }
+
+    pub fn on_click(mut self, on_click: impl FnMut() + 'static) -> Self {
+        self._on_click = Some(Box::new(on_click));
+        self
     }
 }
 
@@ -501,7 +513,15 @@ impl Component for Button {
     }
 
     fn click(&mut self, point: Point, rt: &mut dyn Runtime) -> bool {
-        self.size.contains(point)
+        if self.size.contains(point) {
+            if let Some(on_click) = &mut self._on_click {
+                (on_click)();
+            }
+
+            true
+        } else {
+            false
+        }
     }
 
     fn mouse_up(&mut self, _: Point, _: &mut dyn Runtime) {}
@@ -848,7 +868,8 @@ impl<C1: Component, C2: Component> Component for ResizableCols<C1, C2> {
 }
 
 pub struct App {
-    columns: ResizableCols<Align<Rows<Rect<Text>>>, Text>,
+    columns: ResizableCols<Button, Text>,
+    text: OwnedSignal<String>,
 }
 
 impl Component for App {
@@ -886,49 +907,17 @@ impl Component for App {
 
 impl App {
     pub fn new(bounds: Size, rt: &mut dyn Runtime) -> Self {
+        let text = OwnedSignal::new("Some, text with maybe extra lines and stuff".to_string());
+        let text_signal = text.get_signal();
+
         Self {
             columns: ResizableCols::new(
-                Align::new(
-                    Rows::new(vec![
-                        Rect::new(
-                            Text::new(
-                                "Text 1".to_string(),
-                                bounds,
-                                Color::black().green(1.0),
-                                Alignment::center(),
-                                rt,
-                            ),
-                            bounds,
-                        )
-                        .px_hight(50.0),
-                        Rect::new(
-                            Text::new(
-                                "Text 2".to_string(),
-                                bounds,
-                                Color::black().green(1.0),
-                                Alignment::center(),
-                                rt,
-                            ),
-                            bounds,
-                        )
-                        .px_hight(50.0),
-                        Rect::new(
-                            Text::new(
-                                "Text 3".to_string(),
-                                bounds,
-                                Color::black().green(1.0),
-                                Alignment::center(),
-                                rt,
-                            ),
-                            bounds,
-                        )
-                        .px_hight(50.0),
-                    ]),
-                    bounds,
-                )
-                .center(),
+                Button::new(100.0, 50.0, "Text 1".to_string(), bounds, rt).on_click(move || {
+                    println!("Text 1 clicked");
+                    text_signal.set("Text 1".to_string());
+                }),
                 Text::new(
-                    "Some, text with maybe extra lines and stuff".to_string(),
+                    text_signal,
                     bounds,
                     Color::black().red(1.0),
                     Alignment::center(),
@@ -938,6 +927,7 @@ impl App {
                 bounds,
                 rt,
             ),
+            text,
         }
     }
 
