@@ -68,7 +68,7 @@ struct CachedLine {
 pub struct Text {
     buffer: cosmic_text::Buffer,
     glyphs: Vec<CachedLine>,
-    alignment: Alignment,
+    h_alignment: AxisAlignment,
     size: Size,
     color: Color,
     line_count: usize,
@@ -80,7 +80,7 @@ impl Text {
         value: Signal<String>,
         bounds: Size,
         color: Color,
-        alignment: Alignment,
+        h_alignment: AxisAlignment,
         rt: &mut dyn Runtime,
     ) -> Self {
         let mut buffer = cosmic_text::Buffer::new(
@@ -90,31 +90,20 @@ impl Text {
                 line_height: 40.0,
             },
         );
-        {
-            let value = value.borrow();
-            buffer.set_text(
-                rt.font_system(),
-                &*value,
-                cosmic_text::Attrs::new(),
-                cosmic_text::Shaping::Advanced,
-            );
-        }
-        buffer.set_size(rt.font_system(), Some(bounds.width), Some(bounds.height));
 
-        buffer.shape_until_scroll(rt.font_system(), false);
-        let glyphs = vec![];
+        buffer.set_size(rt.font_system(), Some(bounds.width), Some(bounds.height));
 
         let mut this = Self {
             buffer,
-            glyphs,
+            glyphs: vec![],
             size: bounds,
-            alignment,
+            h_alignment,
             color,
             line_count: 0,
             text: value,
         };
 
-        this.layout_text(rt);
+        this.set_text(&*this.text.borrow(), rt);
         this
     }
 
@@ -122,8 +111,10 @@ impl Text {
         self.glyphs.clear();
         self.buffer.shape_until_scroll(rt.font_system(), false);
         self.line_count = 0;
+        self.size.width = 0.0;
         for run in self.buffer.layout_runs() {
             self.line_count += 1;
+            self.size.width = self.size.width.max(run.line_w);
             let mut line = CachedLine {
                 line: vec![],
                 width: run.line_w,
@@ -141,6 +132,7 @@ impl Text {
             }
             self.glyphs.push(line);
         }
+        self.size.height = 40.0 * self.line_count as f32;
     }
 
     fn set_text(&mut self, text: &str, rt: &mut dyn Runtime) {
@@ -155,29 +147,17 @@ impl Text {
 }
 
 impl Component for Text {
-    fn click(&mut self, _: Point, _: &mut dyn Runtime) -> bool {
-        return false;
-    }
-
-    fn mouse_up(&mut self, _: Point, _: &mut dyn Runtime) {}
-    fn mouse_move(&mut self, _: f32, _: f32, _: &mut dyn Runtime) {}
+    // fn mouse_up(&mut self, _: Point, _: &mut dyn Runtime) {}
+    // fn mouse_move(&mut self, _: f32, _: f32, _: &mut dyn Runtime) {}
 
     fn draw(&mut self, point: Point, rt: &mut dyn Runtime) {
         if self.text.is_dirty() {
             self.set_text(&*self.text.borrow(), rt);
         }
 
-        let end_y_offset =
-            self.size.height - self.buffer.metrics().line_height * self.line_count as f32;
-        let y_offset = match self.alignment.vertical {
-            AxisAlignment::Start => 0.0,
-            AxisAlignment::Center => end_y_offset / 2.0,
-            AxisAlignment::End => end_y_offset,
-        };
-
         for line in &self.glyphs {
             let end_x_offset = self.size.width - line.width;
-            let x_offset = match self.alignment.horizontal {
+            let x_offset = match self.h_alignment {
                 AxisAlignment::Start => 0.0,
                 AxisAlignment::Center => end_x_offset / 2.0,
                 AxisAlignment::End => end_x_offset,
@@ -187,7 +167,7 @@ impl Component for Text {
                 if let Some(tex_position) = glyph.tex_position {
                     rt.draw_glyph(
                         point.x + glyph.left + x_offset,
-                        point.y - glyph.top + y_offset,
+                        point.y - glyph.top,
                         glyph.size,
                         tex_position,
                         self.color,
@@ -200,11 +180,15 @@ impl Component for Text {
     fn set_bounds(&mut self, bounds: Size, rt: &mut dyn Runtime) {
         self.buffer
             .set_size(rt.font_system(), Some(bounds.width), Some(bounds.height));
-        self.size = bounds;
+
         self.layout_text(rt);
     }
 
-    fn size(&self) -> Size {
+    fn size(&mut self, rt: &mut dyn Runtime) -> Size {
+        if self.text.is_dirty() {
+            self.set_text(&*self.text.borrow(), rt);
+        }
+
         self.size
     }
 }
@@ -336,47 +320,47 @@ impl Component for Input {
         }
     }
 
-    fn click(&mut self, point: Point, rt: &mut dyn Runtime) -> bool {
-        if !self.size.contains(point) {
-            return false;
-        }
+    // fn click(&mut self, point: Point, rt: &mut dyn Runtime) -> bool {
+    //     if !self.size.contains(point) {
+    //         return false;
+    //     }
 
-        self.cursor = Some(
-            self.glyphs
-                .line
-                .iter()
-                .find_map(|(glyph, (start, end))| {
-                    if glyph.left <= point.x && point.x <= glyph.left + glyph.size[0] {
-                        Some(*start)
-                    } else {
-                        None
-                    }
-                })
-                .unwrap_or(self.line.text().len()),
-        );
+    //     self.cursor = Some(
+    //         self.glyphs
+    //             .line
+    //             .iter()
+    //             .find_map(|(glyph, (start, end))| {
+    //                 if glyph.left <= point.x && point.x <= glyph.left + glyph.size[0] {
+    //                     Some(*start)
+    //                 } else {
+    //                     None
+    //                 }
+    //             })
+    //             .unwrap_or(self.line.text().len()),
+    //     );
 
-        true
-    }
+    //     true
+    // }
 
-    fn mouse_up(&mut self, _: Point, _: &mut dyn Runtime) {}
-    fn mouse_move(&mut self, _: f32, _: f32, _: &mut dyn Runtime) {}
+    // fn mouse_up(&mut self, _: Point, _: &mut dyn Runtime) {}
+    // fn mouse_move(&mut self, _: f32, _: f32, _: &mut dyn Runtime) {}
 
     fn set_bounds(&mut self, bounds: Size, rt: &mut dyn Runtime) {
         self.size = bounds;
     }
 
-    fn key_pressed(&mut self, key: &str, rt: &mut dyn Runtime) {
-        let Some(cursor) = self.cursor else {
-            return;
-        };
-        let mut text = self.line.text().to_string();
-        text.insert_str(cursor, &key);
-        self.cursor = Some(cursor + key.len());
-        self.set_text(text, rt);
-        self.layout_text(rt);
-    }
+    // fn key_pressed(&mut self, key: &str, rt: &mut dyn Runtime) {
+    //     let Some(cursor) = self.cursor else {
+    //         return;
+    //     };
+    //     let mut text = self.line.text().to_string();
+    //     text.insert_str(cursor, &key);
+    //     self.cursor = Some(cursor + key.len());
+    //     self.set_text(text, rt);
+    //     self.layout_text(rt);
+    // }
 
-    fn size(&self) -> Size {
+    fn size(&mut self, rt: &mut dyn Runtime) -> Size {
         self.size
     }
 }
@@ -438,16 +422,17 @@ pub trait Runtime {
     fn draw_glyph(&mut self, x: f32, y: f32, size: [f32; 2], tex_coords: [f32; 2], color: Color);
     fn font_system(&mut self) -> &mut cosmic_text::FontSystem;
     fn get_glyph(&mut self, key: cosmic_text::CacheKey) -> Option<CachedGlyph>;
+    fn mouse_position(&mut self) -> Signal<Point>;
 }
 
 pub trait Component {
     fn draw(&mut self, point: Point, rt: &mut dyn Runtime);
     fn set_bounds(&mut self, bounds: Size, rt: &mut dyn Runtime);
-    fn size(&self) -> Size;
-    fn click(&mut self, point: Point, rt: &mut dyn Runtime) -> bool;
-    fn mouse_up(&mut self, point: Point, rt: &mut dyn Runtime);
-    fn mouse_move(&mut self, dx: f32, dy: f32, rt: &mut dyn Runtime);
-    fn key_pressed(&mut self, key: &str, rt: &mut dyn Runtime) {}
+    fn size(&mut self, rt: &mut dyn Runtime) -> Size;
+
+    fn click(&mut self, point: Point, rt: &mut dyn Runtime) -> bool {
+        self.size(rt).contains(point)
+    }
 }
 
 enum Sizing {
@@ -489,7 +474,7 @@ impl Button {
                     b: 1.0,
                     a: 1.0,
                 },
-                Alignment::center(),
+                AxisAlignment::Center,
                 rt,
             ),
             _on_click: None,
@@ -530,8 +515,8 @@ impl Component for Button {
         }
     }
 
-    fn mouse_up(&mut self, _: Point, _: &mut dyn Runtime) {}
-    fn mouse_move(&mut self, _: f32, _: f32, _: &mut dyn Runtime) {}
+    // fn mouse_up(&mut self, _: Point, _: &mut dyn Runtime) {}
+    // fn mouse_move(&mut self, _: f32, _: f32, _: &mut dyn Runtime) {}
 
     fn set_bounds(&mut self, bounds: Size, rt: &mut dyn Runtime) {
         self.size = Size {
@@ -541,7 +526,7 @@ impl Component for Button {
         self.text.set_bounds(self.size, rt);
     }
 
-    fn size(&self) -> Size {
+    fn size(&mut self, rt: &mut dyn Runtime) -> Size {
         self.size
     }
 }
@@ -569,16 +554,16 @@ impl<C: Component> Align<C> {
         self
     }
 
-    fn inner_offset(&self) -> Point {
+    fn inner_offset(&mut self, rt: &mut dyn Runtime) -> Point {
         let x = match self.alignment.horizontal {
             AxisAlignment::Start => 0.0,
-            AxisAlignment::Center => (self.size.width - self.inner.size().width) / 2.0,
-            AxisAlignment::End => self.size.width - self.inner.size().width,
+            AxisAlignment::Center => (self.size.width - self.inner.size(rt).width) / 2.0,
+            AxisAlignment::End => self.size.width - self.inner.size(rt).width,
         };
         let y = match self.alignment.vertical {
             AxisAlignment::Start => 0.0,
-            AxisAlignment::Center => (self.size.height - self.inner.size().height) / 2.0,
-            AxisAlignment::End => self.size.height - self.inner.size().height,
+            AxisAlignment::Center => (self.size.height - self.inner.size(rt).height) / 2.0,
+            AxisAlignment::End => self.size.height - self.inner.size(rt).height,
         };
 
         Point { x, y }
@@ -649,12 +634,12 @@ impl<C: Component> Component for Rect<C> {
     fn set_bounds(&mut self, bounds: Size, rt: &mut dyn Runtime) {
         self.size = Size {
             width: bounds.width.min(match self.width {
-                Sizing::Auto => self.inner.size().width,
+                Sizing::Auto => self.inner.size(rt).width,
                 Sizing::Full => bounds.width,
                 Sizing::Value(width) => width,
             }),
             height: bounds.height.min(match self.height {
-                Sizing::Auto => self.inner.size().height,
+                Sizing::Auto => self.inner.size(rt).height,
                 Sizing::Full => bounds.height,
                 Sizing::Value(height) => height,
             }),
@@ -662,30 +647,30 @@ impl<C: Component> Component for Rect<C> {
         self.inner.set_bounds(self.size, rt);
     }
 
-    fn click(&mut self, point: Point, rt: &mut dyn Runtime) -> bool {
-        self.inner.click(point, rt)
-    }
+    // fn click(&mut self, point: Point, rt: &mut dyn Runtime) -> bool {
+    //     self.inner.click(point, rt)
+    // }
 
-    fn mouse_up(&mut self, point: Point, rt: &mut dyn Runtime) {
-        self.inner.mouse_up(point, rt)
-    }
+    // fn mouse_up(&mut self, point: Point, rt: &mut dyn Runtime) {
+    //     self.inner.mouse_up(point, rt)
+    // }
 
-    fn mouse_move(&mut self, dx: f32, dy: f32, rt: &mut dyn Runtime) {
-        self.inner.mouse_move(dx, dy, rt)
-    }
+    // fn mouse_move(&mut self, dx: f32, dy: f32, rt: &mut dyn Runtime) {
+    //     self.inner.mouse_move(dx, dy, rt)
+    // }
 
-    fn key_pressed(&mut self, key: &str, rt: &mut dyn Runtime) {
-        self.inner.key_pressed(key, rt)
-    }
+    // fn key_pressed(&mut self, key: &str, rt: &mut dyn Runtime) {
+    //     self.inner.key_pressed(key, rt)
+    // }
 
-    fn size(&self) -> Size {
+    fn size(&mut self, rt: &mut dyn Runtime) -> Size {
         self.size
     }
 }
 
 impl<C: Component> Component for Align<C> {
     fn draw(&mut self, point: Point, rt: &mut dyn Runtime) {
-        let inner_offset = self.inner_offset();
+        let inner_offset = self.inner_offset(rt);
         self.inner.draw(point + inner_offset, rt)
     }
 
@@ -694,26 +679,26 @@ impl<C: Component> Component for Align<C> {
         self.size = bounds;
     }
 
-    fn click(&mut self, point: Point, rt: &mut dyn Runtime) -> bool {
-        self.size.contains(point) && {
-            let inner_offset = self.inner_offset();
-            self.inner.click(point + inner_offset, rt)
-        }
-    }
+    // fn click(&mut self, point: Point, rt: &mut dyn Runtime) -> bool {
+    //     self.size.contains(point) && {
+    //         let inner_offset = self.inner_offset();
+    //         self.inner.click(point + inner_offset, rt)
+    //     }
+    // }
 
-    fn mouse_up(&mut self, point: Point, rt: &mut dyn Runtime) {
-        self.inner.mouse_up(point, rt)
-    }
+    // fn mouse_up(&mut self, point: Point, rt: &mut dyn Runtime) {
+    //     self.inner.mouse_up(point, rt)
+    // }
 
-    fn mouse_move(&mut self, dx: f32, dy: f32, rt: &mut dyn Runtime) {
-        self.inner.mouse_move(dx, dy, rt)
-    }
+    // fn mouse_move(&mut self, dx: f32, dy: f32, rt: &mut dyn Runtime) {
+    //     self.inner.mouse_move(dx, dy, rt)
+    // }
 
-    fn key_pressed(&mut self, key: &str, rt: &mut dyn Runtime) {
-        self.inner.key_pressed(key, rt)
-    }
+    // fn key_pressed(&mut self, key: &str, rt: &mut dyn Runtime) {
+    //     self.inner.key_pressed(key, rt)
+    // }
 
-    fn size(&self) -> Size {
+    fn size(&mut self, rt: &mut dyn Runtime) -> Size {
         self.size
     }
 }
@@ -725,7 +710,7 @@ struct ResizableCols<C1, C2> {
     col1_width: f32,
     col2_width: f32,
     height: f32,
-    dragging: bool,
+    dragging: Option<Signal<Point>>,
 }
 
 impl<C1: Component, C2: Component> ResizableCols<C1, C2> {
@@ -743,7 +728,7 @@ impl<C1: Component, C2: Component> ResizableCols<C1, C2> {
             col1_width: total_width / 2.0,
             col2_width: total_width / 2.0,
             height: bounds.height,
-            dragging: false,
+            dragging: None,
         }
     }
 }
@@ -758,7 +743,7 @@ impl<C1: Component, C2: Component> Component for ResizableCols<C1, C2> {
             self.height,
             0.0,
             0.0,
-            if self.dragging {
+            if self.dragging.is_some() {
                 Color::black().red(1.0)
             } else {
                 Color::black().blue(1.0)
@@ -807,7 +792,7 @@ impl<C1: Component, C2: Component> Component for ResizableCols<C1, C2> {
         }
 
         if point.x >= self.col1_width && point.x <= self.col1_width + self.spacer_width {
-            self.dragging = true;
+            self.dragging = Some(rt.mouse_position());
             return true;
         }
 
@@ -820,52 +805,52 @@ impl<C1: Component, C2: Component> Component for ResizableCols<C1, C2> {
         false
     }
 
-    fn mouse_up(&mut self, point: Point, rt: &mut dyn Runtime) {
-        self.dragging = false;
-        self.col1.mouse_up(point, rt);
-        self.col2.mouse_up(point, rt);
-    }
+    // fn mouse_up(&mut self, point: Point, rt: &mut dyn Runtime) {
+    //     self.dragging = false;
+    //     self.col1.mouse_up(point, rt);
+    //     self.col2.mouse_up(point, rt);
+    // }
 
-    fn mouse_move(&mut self, dx: f32, dy: f32, rt: &mut dyn Runtime) {
-        let mut diff = dx;
+    // fn mouse_move(&mut self, dx: f32, dy: f32, rt: &mut dyn Runtime) {
+    //     let mut diff = dx;
 
-        if dx < 0.0 {
-            diff = dx.max(-self.col1_width);
-        }
+    //     if dx < 0.0 {
+    //         diff = dx.max(-self.col1_width);
+    //     }
 
-        if dx > 0.0 {
-            diff = dx.min(self.col2_width);
-        }
+    //     if dx > 0.0 {
+    //         diff = dx.min(self.col2_width);
+    //     }
 
-        if self.dragging {
-            self.col1_width += diff;
-            self.col2_width -= diff;
-            self.col1.set_bounds(
-                Size {
-                    width: self.col1_width,
-                    height: self.height,
-                },
-                rt,
-            );
-            self.col2.set_bounds(
-                Size {
-                    width: self.col2_width,
-                    height: self.height,
-                },
-                rt,
-            );
-        }
+    //     if self.dragging {
+    //         self.col1_width += diff;
+    //         self.col2_width -= diff;
+    //         self.col1.set_bounds(
+    //             Size {
+    //                 width: self.col1_width,
+    //                 height: self.height,
+    //             },
+    //             rt,
+    //         );
+    //         self.col2.set_bounds(
+    //             Size {
+    //                 width: self.col2_width,
+    //                 height: self.height,
+    //             },
+    //             rt,
+    //         );
+    //     }
 
-        self.col1.mouse_move(dx, dy, rt);
-        self.col2.mouse_move(dx, dy, rt);
-    }
+    //     self.col1.mouse_move(dx, dy, rt);
+    //     self.col2.mouse_move(dx, dy, rt);
+    // }
 
-    fn key_pressed(&mut self, key: &str, rt: &mut dyn Runtime) {
-        self.col1.key_pressed(key, rt);
-        self.col2.key_pressed(key, rt);
-    }
+    // fn key_pressed(&mut self, key: &str, rt: &mut dyn Runtime) {
+    //     self.col1.key_pressed(key, rt);
+    //     self.col2.key_pressed(key, rt);
+    // }
 
-    fn size(&self) -> Size {
+    fn size(&mut self, rt: &mut dyn Runtime) -> Size {
         Size {
             width: self.width(),
             height: self.height,
@@ -888,23 +873,23 @@ impl Component for App {
         self.columns.click(point, rt)
     }
 
-    fn mouse_up(&mut self, point: Point, rt: &mut dyn Runtime) {
-        self.columns.mouse_up(point, rt);
-    }
+    // fn mouse_up(&mut self, point: Point, rt: &mut dyn Runtime) {
+    //     self.columns.mouse_up(point, rt);
+    // }
 
-    fn mouse_move(&mut self, dx: f32, dy: f32, rt: &mut dyn Runtime) {
-        self.columns.mouse_move(dx, dy, rt);
-    }
+    // fn mouse_move(&mut self, dx: f32, dy: f32, rt: &mut dyn Runtime) {
+    //     self.columns.mouse_move(dx, dy, rt);
+    // }
 
     fn set_bounds(&mut self, bounds: Size, rt: &mut dyn Runtime) {
         self.columns.set_bounds(bounds, rt);
     }
 
-    fn key_pressed(&mut self, key: &str, rt: &mut dyn Runtime) {
-        self.columns.key_pressed(key, rt);
-    }
+    // fn key_pressed(&mut self, key: &str, rt: &mut dyn Runtime) {
+    //     self.columns.key_pressed(key, rt);
+    // }
 
-    fn size(&self) -> Size {
+    fn size(&mut self, rt: &mut dyn Runtime) -> Size {
         Size {
             width: 0.0,
             height: 0.0,
@@ -930,7 +915,7 @@ impl App {
                     text_signal,
                     bounds,
                     Color::black().red(1.0),
-                    Alignment::center(),
+                    AxisAlignment::Center,
                     rt,
                 ),
                 10.0,

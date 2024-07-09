@@ -1508,6 +1508,10 @@ impl static_ui::Runtime for Renderer {
 
         Some(glyph)
     }
+
+    fn mouse_position(&mut self) -> signal::Signal<static_ui::Point> {
+        unimplemented!()
+    }
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -1573,11 +1577,11 @@ fn main() -> Result<(), Box<dyn Error>> {
                         event: WindowEvent::CursorMoved { position, .. },
                         ..
                     } => {
-                        app_ui.mouse_move(
-                            position.x as f32 - mouse_x,
-                            position.y as f32 - mouse_y,
-                            &mut renderer,
-                        );
+                        // app_ui.mouse_move(
+                        //     position.x as f32 - mouse_x,
+                        //     position.y as f32 - mouse_y,
+                        //     &mut renderer,
+                        // );
                         mouse_x = position.x as f32;
                         mouse_y = position.y as f32;
                         window.request_redraw();
@@ -1597,13 +1601,13 @@ fn main() -> Result<(), Box<dyn Error>> {
                                 );
                             }
                             ElementState::Released => {
-                                app_ui.mouse_up(
-                                    static_ui::Point {
-                                        x: mouse_x,
-                                        y: mouse_y,
-                                    },
-                                    &mut renderer,
-                                );
+                                // app_ui.mouse_up(
+                                //     static_ui::Point {
+                                //         x: mouse_x,
+                                //         y: mouse_y,
+                                //     },
+                                //     &mut renderer,
+                                // );
                             }
                         }
                         window.request_redraw();
@@ -1615,7 +1619,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                         eprintln!("{:?}", event);
                         if let Some(text) = event.text {
                             eprintln!("textn {}", &text);
-                            app_ui.key_pressed(&text, &mut renderer);
+                            // app_ui.key_pressed(&text, &mut renderer);
                             window.request_redraw();
                         }
                     }
