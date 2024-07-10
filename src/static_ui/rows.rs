@@ -8,6 +8,10 @@ impl<C: Component> Rows<C> {
     pub fn new(rows: Vec<C>) -> Self {
         Self { rows }
     }
+
+    pub fn set_rows(&mut self, rows: Vec<C>) {
+        self.rows = rows;
+    }
 }
 
 impl<C: Component> Component for Rows<C> {
@@ -26,51 +30,51 @@ impl<C: Component> Component for Rows<C> {
         }
     }
 
-    // fn click(&mut self, point: Point, rt: &mut dyn Runtime) -> bool {
-    //     let mut y_offset = 0.0;
+    fn click(&mut self, point: Point, rt: &mut dyn Runtime) -> bool {
+        let mut y_offset = 0.0;
 
-    //     for row in &mut self.rows {
-    //         if row.click(
-    //             Point {
-    //                 x: point.x,
-    //                 y: point.y + y_offset,
-    //             },
-    //             rt,
-    //         ) {
-    //             return true;
-    //         }
-    //         y_offset += row.size().height;
-    //     }
+        for row in &mut self.rows {
+            if row.click(
+                Point {
+                    x: point.x,
+                    y: point.y + y_offset,
+                },
+                rt,
+            ) {
+                return true;
+            }
+            y_offset += row.size(rt).height;
+        }
 
-    //     false
-    // }
+        false
+    }
 
-    // fn mouse_up(&mut self, point: Point, rt: &mut dyn Runtime) {
-    //     let mut y_offset = 0.0;
+    fn mouse_up(&mut self, point: Point, rt: &mut dyn Runtime) {
+        let mut y_offset = 0.0;
 
-    //     for row in &mut self.rows {
-    //         row.mouse_up(
-    //             Point {
-    //                 x: point.x,
-    //                 y: point.y + y_offset,
-    //             },
-    //             rt,
-    //         );
-    //         y_offset += row.size().height;
-    //     }
-    // }
+        for row in &mut self.rows {
+            row.mouse_up(
+                Point {
+                    x: point.x,
+                    y: point.y + y_offset,
+                },
+                rt,
+            );
+            y_offset += row.size(rt).height;
+        }
+    }
 
-    // fn mouse_move(&mut self, dx: f32, dy: f32, rt: &mut dyn Runtime) {
-    //     for row in &mut self.rows {
-    //         row.mouse_move(dx, dy, rt);
-    //     }
-    // }
+    fn mouse_move(&mut self, dx: f32, dy: f32, rt: &mut dyn Runtime) {
+        for row in &mut self.rows {
+            row.mouse_move(dx, dy, rt);
+        }
+    }
 
-    // fn key_pressed(&mut self, key: &str, rt: &mut dyn Runtime) {
-    //     for row in &mut self.rows {
-    //         row.key_pressed(key, rt);
-    //     }
-    // }
+    fn key_pressed(&mut self, key: &str, rt: &mut dyn Runtime) {
+        for row in &mut self.rows {
+            row.key_pressed(key, rt);
+        }
+    }
 
     fn size(&mut self, rt: &mut dyn Runtime) -> Size {
         Size {

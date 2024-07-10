@@ -1,3 +1,5 @@
+use std::{ffi::OsString, path::PathBuf};
+
 use cosmic_text::{Attrs, AttrsList};
 use rows::Rows;
 
@@ -72,12 +74,11 @@ pub struct Text {
     size: Size,
     color: Color,
     line_count: usize,
-    text: Signal<String>,
 }
 
 impl Text {
     fn new(
-        value: Signal<String>,
+        value: String,
         bounds: Size,
         color: Color,
         h_alignment: AxisAlignment,
@@ -100,10 +101,9 @@ impl Text {
             h_alignment,
             color,
             line_count: 0,
-            text: value,
         };
 
-        this.set_text(&*this.text.borrow(), rt);
+        this.set_text(&value, rt);
         this
     }
 
@@ -147,14 +147,12 @@ impl Text {
 }
 
 impl Component for Text {
-    // fn mouse_up(&mut self, _: Point, _: &mut dyn Runtime) {}
-    // fn mouse_move(&mut self, _: f32, _: f32, _: &mut dyn Runtime) {}
+    fn mouse_up(&mut self, _: Point, _: &mut dyn Runtime) {}
+    fn mouse_move(&mut self, _: f32, _: f32, _: &mut dyn Runtime) {}
+
+    fn key_pressed(&mut self, key: &str, rt: &mut dyn Runtime) {}
 
     fn draw(&mut self, point: Point, rt: &mut dyn Runtime) {
-        if self.text.is_dirty() {
-            self.set_text(&*self.text.borrow(), rt);
-        }
-
         for line in &self.glyphs {
             let end_x_offset = self.size.width - line.width;
             let x_offset = match self.h_alignment {
@@ -185,10 +183,6 @@ impl Component for Text {
     }
 
     fn size(&mut self, rt: &mut dyn Runtime) -> Size {
-        if self.text.is_dirty() {
-            self.set_text(&*self.text.borrow(), rt);
-        }
-
         self.size
     }
 }
@@ -320,45 +314,45 @@ impl Component for Input {
         }
     }
 
-    // fn click(&mut self, point: Point, rt: &mut dyn Runtime) -> bool {
-    //     if !self.size.contains(point) {
-    //         return false;
-    //     }
+    fn click(&mut self, point: Point, rt: &mut dyn Runtime) -> bool {
+        if !self.size.contains(point) {
+            return false;
+        }
 
-    //     self.cursor = Some(
-    //         self.glyphs
-    //             .line
-    //             .iter()
-    //             .find_map(|(glyph, (start, end))| {
-    //                 if glyph.left <= point.x && point.x <= glyph.left + glyph.size[0] {
-    //                     Some(*start)
-    //                 } else {
-    //                     None
-    //                 }
-    //             })
-    //             .unwrap_or(self.line.text().len()),
-    //     );
+        self.cursor = Some(
+            self.glyphs
+                .line
+                .iter()
+                .find_map(|(glyph, (start, end))| {
+                    if glyph.left <= point.x && point.x <= glyph.left + glyph.size[0] {
+                        Some(*start)
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or(self.line.text().len()),
+        );
 
-    //     true
-    // }
+        true
+    }
 
-    // fn mouse_up(&mut self, _: Point, _: &mut dyn Runtime) {}
-    // fn mouse_move(&mut self, _: f32, _: f32, _: &mut dyn Runtime) {}
+    fn mouse_up(&mut self, _: Point, _: &mut dyn Runtime) {}
+    fn mouse_move(&mut self, _: f32, _: f32, _: &mut dyn Runtime) {}
 
     fn set_bounds(&mut self, bounds: Size, rt: &mut dyn Runtime) {
         self.size = bounds;
     }
 
-    // fn key_pressed(&mut self, key: &str, rt: &mut dyn Runtime) {
-    //     let Some(cursor) = self.cursor else {
-    //         return;
-    //     };
-    //     let mut text = self.line.text().to_string();
-    //     text.insert_str(cursor, &key);
-    //     self.cursor = Some(cursor + key.len());
-    //     self.set_text(text, rt);
-    //     self.layout_text(rt);
-    // }
+    fn key_pressed(&mut self, key: &str, rt: &mut dyn Runtime) {
+        let Some(cursor) = self.cursor else {
+            return;
+        };
+        let mut text = self.line.text().to_string();
+        text.insert_str(cursor, &key);
+        self.cursor = Some(cursor + key.len());
+        self.set_text(text, rt);
+        self.layout_text(rt);
+    }
 
     fn size(&mut self, rt: &mut dyn Runtime) -> Size {
         self.size
@@ -422,7 +416,6 @@ pub trait Runtime {
     fn draw_glyph(&mut self, x: f32, y: f32, size: [f32; 2], tex_coords: [f32; 2], color: Color);
     fn font_system(&mut self) -> &mut cosmic_text::FontSystem;
     fn get_glyph(&mut self, key: cosmic_text::CacheKey) -> Option<CachedGlyph>;
-    fn mouse_position(&mut self) -> Signal<Point>;
 }
 
 pub trait Component {
@@ -433,6 +426,12 @@ pub trait Component {
     fn click(&mut self, point: Point, rt: &mut dyn Runtime) -> bool {
         self.size(rt).contains(point)
     }
+
+    fn mouse_up(&mut self, point: Point, rt: &mut dyn Runtime);
+
+    fn mouse_move(&mut self, dx: f32, dy: f32, rt: &mut dyn Runtime);
+
+    fn key_pressed(&mut self, key: &str, rt: &mut dyn Runtime);
 }
 
 enum Sizing {
@@ -446,7 +445,6 @@ struct Button {
     height: f32,
     size: Size,
     text: Text,
-    text_signal: OwnedSignal<String>,
     _on_click: Option<Box<dyn FnMut()>>,
 }
 
@@ -457,14 +455,10 @@ impl Button {
             height: height.min(bounds.height),
         };
 
-        let text_signal = OwnedSignal::new(text);
-        let text = text_signal.get_signal();
-
         Self {
             width,
             height,
             size,
-            text_signal,
             text: Text::new(
                 text,
                 size,
@@ -515,8 +509,10 @@ impl Component for Button {
         }
     }
 
-    // fn mouse_up(&mut self, _: Point, _: &mut dyn Runtime) {}
-    // fn mouse_move(&mut self, _: f32, _: f32, _: &mut dyn Runtime) {}
+    fn mouse_up(&mut self, _: Point, _: &mut dyn Runtime) {}
+    fn mouse_move(&mut self, _: f32, _: f32, _: &mut dyn Runtime) {}
+
+    fn key_pressed(&mut self, key: &str, rt: &mut dyn Runtime) {}
 
     fn set_bounds(&mut self, bounds: Size, rt: &mut dyn Runtime) {
         self.size = Size {
@@ -647,21 +643,21 @@ impl<C: Component> Component for Rect<C> {
         self.inner.set_bounds(self.size, rt);
     }
 
-    // fn click(&mut self, point: Point, rt: &mut dyn Runtime) -> bool {
-    //     self.inner.click(point, rt)
-    // }
+    fn click(&mut self, point: Point, rt: &mut dyn Runtime) -> bool {
+        self.inner.click(point, rt)
+    }
 
-    // fn mouse_up(&mut self, point: Point, rt: &mut dyn Runtime) {
-    //     self.inner.mouse_up(point, rt)
-    // }
+    fn mouse_up(&mut self, point: Point, rt: &mut dyn Runtime) {
+        self.inner.mouse_up(point, rt)
+    }
 
-    // fn mouse_move(&mut self, dx: f32, dy: f32, rt: &mut dyn Runtime) {
-    //     self.inner.mouse_move(dx, dy, rt)
-    // }
+    fn mouse_move(&mut self, dx: f32, dy: f32, rt: &mut dyn Runtime) {
+        self.inner.mouse_move(dx, dy, rt)
+    }
 
-    // fn key_pressed(&mut self, key: &str, rt: &mut dyn Runtime) {
-    //     self.inner.key_pressed(key, rt)
-    // }
+    fn key_pressed(&mut self, key: &str, rt: &mut dyn Runtime) {
+        self.inner.key_pressed(key, rt)
+    }
 
     fn size(&mut self, rt: &mut dyn Runtime) -> Size {
         self.size
@@ -679,24 +675,24 @@ impl<C: Component> Component for Align<C> {
         self.size = bounds;
     }
 
-    // fn click(&mut self, point: Point, rt: &mut dyn Runtime) -> bool {
-    //     self.size.contains(point) && {
-    //         let inner_offset = self.inner_offset();
-    //         self.inner.click(point + inner_offset, rt)
-    //     }
-    // }
+    fn click(&mut self, point: Point, rt: &mut dyn Runtime) -> bool {
+        self.size.contains(point) && {
+            let inner_offset = self.inner_offset(rt);
+            self.inner.click(point + inner_offset, rt)
+        }
+    }
 
-    // fn mouse_up(&mut self, point: Point, rt: &mut dyn Runtime) {
-    //     self.inner.mouse_up(point, rt)
-    // }
+    fn mouse_up(&mut self, point: Point, rt: &mut dyn Runtime) {
+        self.inner.mouse_up(point, rt)
+    }
 
-    // fn mouse_move(&mut self, dx: f32, dy: f32, rt: &mut dyn Runtime) {
-    //     self.inner.mouse_move(dx, dy, rt)
-    // }
+    fn mouse_move(&mut self, dx: f32, dy: f32, rt: &mut dyn Runtime) {
+        self.inner.mouse_move(dx, dy, rt)
+    }
 
-    // fn key_pressed(&mut self, key: &str, rt: &mut dyn Runtime) {
-    //     self.inner.key_pressed(key, rt)
-    // }
+    fn key_pressed(&mut self, key: &str, rt: &mut dyn Runtime) {
+        self.inner.key_pressed(key, rt)
+    }
 
     fn size(&mut self, rt: &mut dyn Runtime) -> Size {
         self.size
@@ -710,7 +706,7 @@ struct ResizableCols<C1, C2> {
     col1_width: f32,
     col2_width: f32,
     height: f32,
-    dragging: Option<Signal<Point>>,
+    dragging: bool,
 }
 
 impl<C1: Component, C2: Component> ResizableCols<C1, C2> {
@@ -728,7 +724,7 @@ impl<C1: Component, C2: Component> ResizableCols<C1, C2> {
             col1_width: total_width / 2.0,
             col2_width: total_width / 2.0,
             height: bounds.height,
-            dragging: None,
+            dragging: false,
         }
     }
 }
@@ -743,7 +739,7 @@ impl<C1: Component, C2: Component> Component for ResizableCols<C1, C2> {
             self.height,
             0.0,
             0.0,
-            if self.dragging.is_some() {
+            if self.dragging {
                 Color::black().red(1.0)
             } else {
                 Color::black().blue(1.0)
@@ -792,7 +788,7 @@ impl<C1: Component, C2: Component> Component for ResizableCols<C1, C2> {
         }
 
         if point.x >= self.col1_width && point.x <= self.col1_width + self.spacer_width {
-            self.dragging = Some(rt.mouse_position());
+            self.dragging = true;
             return true;
         }
 
@@ -805,50 +801,50 @@ impl<C1: Component, C2: Component> Component for ResizableCols<C1, C2> {
         false
     }
 
-    // fn mouse_up(&mut self, point: Point, rt: &mut dyn Runtime) {
-    //     self.dragging = false;
-    //     self.col1.mouse_up(point, rt);
-    //     self.col2.mouse_up(point, rt);
-    // }
+    fn mouse_up(&mut self, point: Point, rt: &mut dyn Runtime) {
+        self.dragging = false;
+        self.col1.mouse_up(point, rt);
+        self.col2.mouse_up(point, rt);
+    }
 
-    // fn mouse_move(&mut self, dx: f32, dy: f32, rt: &mut dyn Runtime) {
-    //     let mut diff = dx;
+    fn mouse_move(&mut self, dx: f32, dy: f32, rt: &mut dyn Runtime) {
+        let mut diff = dx;
 
-    //     if dx < 0.0 {
-    //         diff = dx.max(-self.col1_width);
-    //     }
+        if dx < 0.0 {
+            diff = dx.max(-self.col1_width);
+        }
 
-    //     if dx > 0.0 {
-    //         diff = dx.min(self.col2_width);
-    //     }
+        if dx > 0.0 {
+            diff = dx.min(self.col2_width);
+        }
 
-    //     if self.dragging {
-    //         self.col1_width += diff;
-    //         self.col2_width -= diff;
-    //         self.col1.set_bounds(
-    //             Size {
-    //                 width: self.col1_width,
-    //                 height: self.height,
-    //             },
-    //             rt,
-    //         );
-    //         self.col2.set_bounds(
-    //             Size {
-    //                 width: self.col2_width,
-    //                 height: self.height,
-    //             },
-    //             rt,
-    //         );
-    //     }
+        if self.dragging {
+            self.col1_width += diff;
+            self.col2_width -= diff;
+            self.col1.set_bounds(
+                Size {
+                    width: self.col1_width,
+                    height: self.height,
+                },
+                rt,
+            );
+            self.col2.set_bounds(
+                Size {
+                    width: self.col2_width,
+                    height: self.height,
+                },
+                rt,
+            );
+        }
 
-    //     self.col1.mouse_move(dx, dy, rt);
-    //     self.col2.mouse_move(dx, dy, rt);
-    // }
+        self.col1.mouse_move(dx, dy, rt);
+        self.col2.mouse_move(dx, dy, rt);
+    }
 
-    // fn key_pressed(&mut self, key: &str, rt: &mut dyn Runtime) {
-    //     self.col1.key_pressed(key, rt);
-    //     self.col2.key_pressed(key, rt);
-    // }
+    fn key_pressed(&mut self, key: &str, rt: &mut dyn Runtime) {
+        self.col1.key_pressed(key, rt);
+        self.col2.key_pressed(key, rt);
+    }
 
     fn size(&mut self, rt: &mut dyn Runtime) -> Size {
         Size {
@@ -859,9 +855,8 @@ impl<C1: Component, C2: Component> Component for ResizableCols<C1, C2> {
 }
 
 pub struct App {
-    columns: ResizableCols<Button, Text>,
-    count: OwnedSignal<u32>,
-    text: OwnedSignal<String>,
+    columns: ResizableCols<Button, Rows<Text>>,
+    file_tree: Vec<FileTree>,
 }
 
 impl Component for App {
@@ -873,21 +868,21 @@ impl Component for App {
         self.columns.click(point, rt)
     }
 
-    // fn mouse_up(&mut self, point: Point, rt: &mut dyn Runtime) {
-    //     self.columns.mouse_up(point, rt);
-    // }
+    fn mouse_up(&mut self, point: Point, rt: &mut dyn Runtime) {
+        self.columns.mouse_up(point, rt);
+    }
 
-    // fn mouse_move(&mut self, dx: f32, dy: f32, rt: &mut dyn Runtime) {
-    //     self.columns.mouse_move(dx, dy, rt);
-    // }
+    fn mouse_move(&mut self, dx: f32, dy: f32, rt: &mut dyn Runtime) {
+        self.columns.mouse_move(dx, dy, rt);
+    }
 
     fn set_bounds(&mut self, bounds: Size, rt: &mut dyn Runtime) {
         self.columns.set_bounds(bounds, rt);
     }
 
-    // fn key_pressed(&mut self, key: &str, rt: &mut dyn Runtime) {
-    //     self.columns.key_pressed(key, rt);
-    // }
+    fn key_pressed(&mut self, key: &str, rt: &mut dyn Runtime) {
+        self.columns.key_pressed(key, rt);
+    }
 
     fn size(&mut self, rt: &mut dyn Runtime) -> Size {
         Size {
@@ -897,37 +892,94 @@ impl Component for App {
     }
 }
 
+pub struct FileTree {
+    name: OsString,
+    children: Vec<FileTree>,
+}
+
+impl FileTree {
+    pub fn from_path(path: impl AsRef<std::path::Path>) -> Vec<Self> {
+        let mut roots = vec![];
+
+        for entry in std::fs::read_dir(path).unwrap() {
+            let entry = entry.unwrap();
+            let path = entry.path();
+            let name = path.file_name().unwrap().to_owned();
+
+            if name != ".git" {
+                roots.push(Self {
+                    name,
+                    children: if path.is_dir() {
+                        Self::from_path(path)
+                    } else {
+                        vec![]
+                    },
+                });
+            }
+        }
+
+        roots
+    }
+}
+
 impl App {
-    pub fn new(bounds: Size, rt: &mut dyn Runtime) -> Self {
-        let count = OwnedSignal::new(0);
-        let count_signal = count.get_signal();
-
-        let text = count_signal.derived(|count| format!("Count: {}", count));
-        let text_signal = text.get_signal();
-
+    pub fn new(bounds: Size, file_tree: Vec<FileTree>, rt: &mut dyn Runtime) -> Self {
         Self {
             columns: ResizableCols::new(
-                Button::new(100.0, 50.0, "Text 1".to_string(), bounds, rt).on_click(move || {
-                    println!("Text 1 clicked");
-                    count_signal.update(|value| *value += 1);
-                }),
-                Text::new(
-                    text_signal,
-                    bounds,
-                    Color::black().red(1.0),
-                    AxisAlignment::Center,
-                    rt,
-                ),
+                Button::new(100.0, 50.0, "Text 1".to_string(), bounds, rt),
+                Rows::new(Self::file_tree_to_rows(&file_tree, bounds, rt)),
                 10.0,
                 bounds,
                 rt,
             ),
-            count,
-            text,
+            file_tree,
         }
     }
 
+    pub fn add_files(&mut self, files: &[PathBuf], rt: &mut dyn Runtime) {}
+
+    pub fn remove_files(&mut self, files: &[PathBuf], rt: &mut dyn Runtime) {}
+
     pub fn set_text_list(&mut self, text_list: Vec<String>, rt: &mut dyn Runtime) {
-        // self.columns.col1.inner.
+        let new_rows = text_list
+            .into_iter()
+            .map(|text| {
+                Text::new(
+                    text,
+                    self.size(rt),
+                    Color::black().red(1.0),
+                    AxisAlignment::Center,
+                    rt,
+                )
+            })
+            .collect();
+        self.columns.col2.set_rows(new_rows);
+    }
+
+    fn file_tree_to_rows(file_tree: &[FileTree], size: Size, rt: &mut dyn Runtime) -> Vec<Text> {
+        let mut rows = vec![];
+        for file_tree in file_tree {
+            Self::insert_file_tree(file_tree, &mut rows, size, rt);
+        }
+        rows.truncate(35);
+        rows
+    }
+
+    fn insert_file_tree(
+        file_tree: &FileTree,
+        rows: &mut Vec<Text>,
+        size: Size,
+        rt: &mut dyn Runtime,
+    ) {
+        rows.push(Text::new(
+            file_tree.name.to_string_lossy().to_string(),
+            size,
+            Color::black().red(1.0),
+            AxisAlignment::Center,
+            rt,
+        ));
+        for child in &file_tree.children {
+            Self::insert_file_tree(child, rows, size, rt);
+        }
     }
 }

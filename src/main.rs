@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use std::default::Default;
 use std::error::Error;
 use std::ffi;
+use std::fs;
 use std::hash::Hash;
 use std::io::Cursor;
 use std::mem;
@@ -19,6 +20,7 @@ use ash::vk::DescriptorType;
 use ash::vk::PipelineVertexInputStateCreateInfo;
 use ash::vk::ShaderStageFlags;
 use cosmic_text::ttf_parser::head;
+use notify::Watcher;
 use static_ui::Color;
 use static_ui::Component;
 
@@ -658,7 +660,7 @@ impl Renderer {
                 .map(|_| {
                     create_buffer(
                         &device,
-                        128 * mem::size_of::<RenderedRectangle>() as u64,
+                        1024 * mem::size_of::<RenderedRectangle>() as u64,
                         vk::BufferUsageFlags::VERTEX_BUFFER | vk::BufferUsageFlags::TRANSFER_DST,
                         vk::MemoryPropertyFlags::HOST_VISIBLE
                             | vk::MemoryPropertyFlags::HOST_COHERENT,
@@ -1508,32 +1510,48 @@ impl static_ui::Runtime for Renderer {
 
         Some(glyph)
     }
-
-    fn mouse_position(&mut self) -> signal::Signal<static_ui::Point> {
-        unimplemented!()
-    }
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
     unsafe {
-        let event_loop = EventLoop::new()?;
+        let event_loop = EventLoop::<notify::Event>::with_user_event().build()?;
         let window = event_loop.create_window(WindowAttributes::new())?;
 
         let mut renderer = Renderer::new(&window)?;
+
+        let mut mouse_x = 0.0;
+        let mut mouse_y = 0.0;
+
+        let proxy = event_loop.create_proxy();
+
+        let mut watcher =
+            notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
+                match event {
+                    Ok(event) => {
+                        proxy.send_event(event).unwrap();
+                    }
+                    Err(error) => eprintln!("watch error: {error}"),
+                };
+            })
+            .unwrap();
+
+        watcher
+            .watch(std::path::Path::new("."), notify::RecursiveMode::Recursive)
+            .unwrap();
+
+        let file_tree = static_ui::FileTree::from_path(".");
 
         let mut app_ui = static_ui::App::new(
             static_ui::Size {
                 width: window.inner_size().width as f32,
                 height: window.inner_size().height as f32,
             },
+            file_tree,
             &mut renderer,
         );
 
-        let mut mouse_x = 0.0;
-        let mut mouse_y = 0.0;
-
         event_loop
-            .run(|event, elwp| {
+            .run(move |event, elwp| {
                 elwp.set_control_flow(ControlFlow::Wait);
                 match event {
                     Event::WindowEvent {
@@ -1577,11 +1595,11 @@ fn main() -> Result<(), Box<dyn Error>> {
                         event: WindowEvent::CursorMoved { position, .. },
                         ..
                     } => {
-                        // app_ui.mouse_move(
-                        //     position.x as f32 - mouse_x,
-                        //     position.y as f32 - mouse_y,
-                        //     &mut renderer,
-                        // );
+                        app_ui.mouse_move(
+                            position.x as f32 - mouse_x,
+                            position.y as f32 - mouse_y,
+                            &mut renderer,
+                        );
                         mouse_x = position.x as f32;
                         mouse_y = position.y as f32;
                         window.request_redraw();
@@ -1601,13 +1619,13 @@ fn main() -> Result<(), Box<dyn Error>> {
                                 );
                             }
                             ElementState::Released => {
-                                // app_ui.mouse_up(
-                                //     static_ui::Point {
-                                //         x: mouse_x,
-                                //         y: mouse_y,
-                                //     },
-                                //     &mut renderer,
-                                // );
+                                app_ui.mouse_up(
+                                    static_ui::Point {
+                                        x: mouse_x,
+                                        y: mouse_y,
+                                    },
+                                    &mut renderer,
+                                );
                             }
                         }
                         window.request_redraw();
@@ -1619,10 +1637,15 @@ fn main() -> Result<(), Box<dyn Error>> {
                         eprintln!("{:?}", event);
                         if let Some(text) = event.text {
                             eprintln!("textn {}", &text);
-                            // app_ui.key_pressed(&text, &mut renderer);
+                            app_ui.key_pressed(&text, &mut renderer);
                             window.request_redraw();
                         }
                     }
+                    Event::UserEvent(event) => match event.kind {
+                        notify::EventKind::Create(_) => {}
+                        notify::EventKind::Remove(_) => {}
+                        _ => {}
+                    },
                     _ => (),
                 }
             })
