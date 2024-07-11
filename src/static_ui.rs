@@ -895,6 +895,7 @@ impl Component for App {
 pub struct FileTree {
     name: OsString,
     children: Vec<FileTree>,
+    expanded: bool,
 }
 
 impl FileTree {
@@ -914,6 +915,7 @@ impl FileTree {
                     } else {
                         vec![]
                     },
+                    expanded: false,
                 });
             }
         }
@@ -940,20 +942,15 @@ impl App {
 
     pub fn remove_files(&mut self, files: &[PathBuf], rt: &mut dyn Runtime) {}
 
-    pub fn set_text_list(&mut self, text_list: Vec<String>, rt: &mut dyn Runtime) {
-        let new_rows = text_list
-            .into_iter()
-            .map(|text| {
-                Text::new(
-                    text,
-                    self.size(rt),
-                    Color::black().red(1.0),
-                    AxisAlignment::Center,
-                    rt,
-                )
-            })
-            .collect();
-        self.columns.col2.set_rows(new_rows);
+    fn rerender_file_tree(&mut self, rt: &mut dyn Runtime) {
+        self.columns.col2.set_rows(Self::file_tree_to_rows(
+            &self.file_tree,
+            Size {
+                width: 100.0,
+                height: 100.0,
+            },
+            rt,
+        ))
     }
 
     fn file_tree_to_rows(file_tree: &[FileTree], size: Size, rt: &mut dyn Runtime) -> Vec<Text> {
@@ -978,6 +975,11 @@ impl App {
             AxisAlignment::Center,
             rt,
         ));
+
+        if !file_tree.expanded {
+            return;
+        }
+
         for child in &file_tree.children {
             Self::insert_file_tree(child, rows, size, rt);
         }
