@@ -26,7 +26,7 @@ impl<C: Component> Component for Rows<C> {
                 },
                 rt,
             );
-            y_offset += row.size(rt).height;
+            y_offset += row.size().height;
         }
     }
 
@@ -43,7 +43,7 @@ impl<C: Component> Component for Rows<C> {
             ) {
                 return true;
             }
-            y_offset += row.size(rt).height;
+            y_offset += row.size().height;
         }
 
         false
@@ -60,7 +60,7 @@ impl<C: Component> Component for Rows<C> {
                 },
                 rt,
             );
-            y_offset += row.size(rt).height;
+            y_offset += row.size().height;
         }
     }
 
@@ -76,15 +76,15 @@ impl<C: Component> Component for Rows<C> {
         }
     }
 
-    fn size(&mut self, rt: &mut dyn Runtime) -> Size {
+    fn size(&self) -> Size {
         Size {
             width: self
                 .rows
-                .iter_mut()
-                .map(|row| row.size(rt).width)
+                .iter()
+                .map(|row| row.size().width)
                 .max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
                 .unwrap_or(0.0),
-            height: self.rows.iter_mut().map(|row| row.size(rt).height).sum(),
+            height: self.rows.iter().map(|row| row.size().height).sum(),
         }
     }
 
@@ -99,7 +99,15 @@ impl<C: Component> Component for Rows<C> {
                 },
                 rt,
             );
-            height_remaining -= row.size(rt).height;
+            height_remaining -= row.size().height;
+        }
+    }
+
+    fn child_size_changed(&mut self, rt: &mut dyn Runtime) {}
+
+    fn visit_children(&mut self, f: &mut dyn FnMut(Point, &mut dyn Component) -> bool) {
+        for row in &mut self.rows {
+            f(Point { x: 0.0, y: 0.0 }, row);
         }
     }
 }

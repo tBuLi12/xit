@@ -1,14 +1,17 @@
-use std::{ffi::OsString, path::PathBuf};
+use std::{
+    ffi::OsString,
+    fs, iter, mem,
+    path::{self, PathBuf},
+};
 
 use cosmic_text::{Attrs, AttrsList};
 use rows::Rows;
+use text::Text;
 
 mod rows;
+mod text;
 
-use crate::{
-    signal::{OwnedSignal, Signal},
-    CachedGlyph,
-};
+use crate::CachedGlyph;
 
 #[derive(Copy, Clone, Debug)]
 pub struct Size {
@@ -17,6 +20,11 @@ pub struct Size {
 }
 
 impl Size {
+    pub const ZERO: Self = Self {
+        width: 0.0,
+        height: 0.0,
+    };
+
     pub fn contains(&self, point: Point) -> bool {
         point.x >= 0.0 && point.y >= 0.0 && point.x < self.width && point.y < self.height
     }
@@ -60,304 +68,177 @@ impl Alignment {
     }
 }
 
-#[derive(Clone, Debug)]
-struct CachedLine {
-    line: Vec<(CachedGlyph, (usize, usize))>,
-    width: f32,
-}
+// #[derive(Debug)]
+// pub struct Input {
+//     line: cosmic_text::BufferLine,
+//     glyphs: CachedLine,
+//     size: Size,
+//     color: Color,
+//     cursor: Option<usize>,
+// }
 
-#[derive(Clone, Debug)]
-pub struct Text {
-    buffer: cosmic_text::Buffer,
-    glyphs: Vec<CachedLine>,
-    h_alignment: AxisAlignment,
-    size: Size,
-    color: Color,
-    line_count: usize,
-}
+// impl Input {
+//     fn new(value: String, bounds: Size, color: Color, rt: &mut dyn Runtime) -> Self {
+//         let line = cosmic_text::BufferLine::new(
+//             value,
+//             cosmic_text::LineEnding::None,
+//             AttrsList::new(Attrs::new()),
+//             cosmic_text::Shaping::Advanced,
+//         );
 
-impl Text {
-    fn new(
-        value: String,
-        bounds: Size,
-        color: Color,
-        h_alignment: AxisAlignment,
-        rt: &mut dyn Runtime,
-    ) -> Self {
-        let mut buffer = cosmic_text::Buffer::new(
-            rt.font_system(),
-            cosmic_text::Metrics {
-                font_size: 40.0,
-                line_height: 40.0,
-            },
-        );
+//         let mut this = Self {
+//             line,
+//             glyphs: CachedLine {
+//                 line: vec![],
+//                 width: 0.0,
+//             },
+//             size: bounds,
+//             color,
+//             cursor: None,
+//         };
 
-        buffer.set_size(rt.font_system(), Some(bounds.width), Some(bounds.height));
+//         this.layout_text(rt);
+//         this
+//     }
 
-        let mut this = Self {
-            buffer,
-            glyphs: vec![],
-            size: bounds,
-            h_alignment,
-            color,
-            line_count: 0,
-        };
+//     fn layout_text(&mut self, rt: &mut dyn Runtime) {
+//         self.glyphs.line.clear();
 
-        this.set_text(&value, rt);
-        this
-    }
+//         let shape = self.line.shape(rt.font_system(), 4);
+//         let laid_out_line = shape
+//             .layout(
+//                 40.0,
+//                 None,
+//                 cosmic_text::Wrap::None,
+//                 Some(cosmic_text::Align::Left),
+//                 None,
+//             )
+//             .pop()
+//             .unwrap();
 
-    fn layout_text(&mut self, rt: &mut dyn Runtime) {
-        self.glyphs.clear();
-        self.buffer.shape_until_scroll(rt.font_system(), false);
-        self.line_count = 0;
-        self.size.width = 0.0;
-        for run in self.buffer.layout_runs() {
-            self.line_count += 1;
-            self.size.width = self.size.width.max(run.line_w);
-            let mut line = CachedLine {
-                line: vec![],
-                width: run.line_w,
-            };
-            for glyph in run.glyphs {
-                let physical_glyph = glyph.physical((0.0, 0.0), 1.0);
-                let Some(mut cached_glyph) = rt.get_glyph(physical_glyph.cache_key) else {
-                    continue;
-                };
+//         for glyph in laid_out_line.glyphs {
+//             let physical_glyph = glyph.physical((0.0, 0.0), 1.0);
+//             let Some(mut cached_glyph) = rt.get_glyph(physical_glyph.cache_key) else {
+//                 continue;
+//             };
 
-                cached_glyph.top += physical_glyph.y as f32 - run.line_y;
-                cached_glyph.left += physical_glyph.x as f32;
+//             cached_glyph.top += physical_glyph.y as f32 - laid_out_line.max_ascent;
+//             cached_glyph.left += physical_glyph.x as f32;
 
-                line.line.push((cached_glyph, (glyph.start, glyph.end)));
-            }
-            self.glyphs.push(line);
-        }
-        self.size.height = 40.0 * self.line_count as f32;
-    }
+//             self.glyphs
+//                 .line
+//                 .push((cached_glyph, (glyph.start, glyph.end)));
+//         }
 
-    fn set_text(&mut self, text: &str, rt: &mut dyn Runtime) {
-        self.buffer.set_text(
-            rt.font_system(),
-            &text,
-            cosmic_text::Attrs::new(),
-            cosmic_text::Shaping::Advanced,
-        );
-        self.layout_text(rt);
-    }
-}
+//         self.glyphs.width = laid_out_line.w;
+//     }
 
-impl Component for Text {
-    fn mouse_up(&mut self, _: Point, _: &mut dyn Runtime) {}
-    fn mouse_move(&mut self, _: f32, _: f32, _: &mut dyn Runtime) {}
+//     fn set_text(&mut self, text: String, rt: &mut dyn Runtime) {
+//         if self.line.set_text(
+//             text,
+//             cosmic_text::LineEnding::None,
+//             AttrsList::new(Attrs::new()),
+//         ) {
+//             self.layout_text(rt);
+//         }
+//     }
+// }
 
-    fn key_pressed(&mut self, key: &str, rt: &mut dyn Runtime) {}
+// impl Component for Input {
+//     fn draw(&mut self, point: Point, rt: &mut dyn Runtime) {
+//         rt.draw_rect(
+//             point.x,
+//             point.y,
+//             self.size.width,
+//             self.size.height,
+//             0.0,
+//             0.0,
+//             Color::black().blue(1.0),
+//             Color::clear(),
+//         );
 
-    fn draw(&mut self, point: Point, rt: &mut dyn Runtime) {
-        for line in &self.glyphs {
-            let end_x_offset = self.size.width - line.width;
-            let x_offset = match self.h_alignment {
-                AxisAlignment::Start => 0.0,
-                AxisAlignment::Center => end_x_offset / 2.0,
-                AxisAlignment::End => end_x_offset,
-            };
+//         for (glyph, _) in &self.glyphs.line {
+//             if let Some(tex_position) = glyph.tex_position {
+//                 rt.draw_glyph(
+//                     point.x + glyph.left,
+//                     point.y - glyph.top,
+//                     glyph.size,
+//                     tex_position,
+//                     self.color,
+//                 );
+//             }
+//         }
 
-            for (glyph, _) in &line.line {
-                if let Some(tex_position) = glyph.tex_position {
-                    rt.draw_glyph(
-                        point.x + glyph.left + x_offset,
-                        point.y - glyph.top,
-                        glyph.size,
-                        tex_position,
-                        self.color,
-                    );
-                }
-            }
-        }
-    }
+//         if let Some(cursor) = self.cursor {
+//             let offset = if cursor == 0 {
+//                 0.0
+//             } else {
+//                 let glyph = self.glyphs.line[cursor - 1].0;
+//                 glyph.left + glyph.size[0]
+//             };
 
-    fn set_bounds(&mut self, bounds: Size, rt: &mut dyn Runtime) {
-        self.buffer
-            .set_size(rt.font_system(), Some(bounds.width), Some(bounds.height));
+//             rt.draw_rect(
+//                 point.x + offset,
+//                 point.y,
+//                 2.0,
+//                 self.size.height,
+//                 0.0,
+//                 0.0,
+//                 Color {
+//                     r: 0.0,
+//                     g: 0.0,
+//                     b: 0.0,
+//                     a: 0.5,
+//                 },
+//                 Color::clear(),
+//             );
+//         }
+//     }
 
-        self.layout_text(rt);
-    }
+//     fn click(&mut self, point: Point, rt: &mut dyn Runtime) -> bool {
+//         if !self.size.contains(point) {
+//             return false;
+//         }
 
-    fn size(&mut self, rt: &mut dyn Runtime) -> Size {
-        self.size
-    }
-}
+//         self.cursor = Some(
+//             self.glyphs
+//                 .line
+//                 .iter()
+//                 .find_map(|(glyph, (start, end))| {
+//                     if glyph.left <= point.x && point.x <= glyph.left + glyph.size[0] {
+//                         Some(*start)
+//                     } else {
+//                         None
+//                     }
+//                 })
+//                 .unwrap_or(self.line.text().len()),
+//         );
 
-#[derive(Debug)]
-pub struct Input {
-    line: cosmic_text::BufferLine,
-    glyphs: CachedLine,
-    size: Size,
-    color: Color,
-    cursor: Option<usize>,
-}
+//         true
+//     }
 
-impl Input {
-    fn new(value: String, bounds: Size, color: Color, rt: &mut dyn Runtime) -> Self {
-        let line = cosmic_text::BufferLine::new(
-            value,
-            cosmic_text::LineEnding::None,
-            AttrsList::new(Attrs::new()),
-            cosmic_text::Shaping::Advanced,
-        );
+//     fn mouse_up(&mut self, _: Point, _: &mut dyn Runtime) {}
+//     fn mouse_move(&mut self, _: f32, _: f32, _: &mut dyn Runtime) {}
 
-        let mut this = Self {
-            line,
-            glyphs: CachedLine {
-                line: vec![],
-                width: 0.0,
-            },
-            size: bounds,
-            color,
-            cursor: None,
-        };
+//     fn set_bounds(&mut self, bounds: Size, rt: &mut dyn Runtime) {
+//         self.size = bounds;
+//     }
 
-        this.layout_text(rt);
-        this
-    }
+//     fn key_pressed(&mut self, key: &str, rt: &mut dyn Runtime) {
+//         let Some(cursor) = self.cursor else {
+//             return;
+//         };
+//         let mut text = self.line.text().to_string();
+//         text.insert_str(cursor, &key);
+//         self.cursor = Some(cursor + key.len());
+//         self.set_text(text, rt);
+//         self.layout_text(rt);
+//     }
 
-    fn layout_text(&mut self, rt: &mut dyn Runtime) {
-        self.glyphs.line.clear();
-
-        let shape = self.line.shape(rt.font_system(), 4);
-        let laid_out_line = shape
-            .layout(
-                40.0,
-                None,
-                cosmic_text::Wrap::None,
-                Some(cosmic_text::Align::Left),
-                None,
-            )
-            .pop()
-            .unwrap();
-
-        for glyph in laid_out_line.glyphs {
-            let physical_glyph = glyph.physical((0.0, 0.0), 1.0);
-            let Some(mut cached_glyph) = rt.get_glyph(physical_glyph.cache_key) else {
-                continue;
-            };
-
-            cached_glyph.top += physical_glyph.y as f32 - laid_out_line.max_ascent;
-            cached_glyph.left += physical_glyph.x as f32;
-
-            self.glyphs
-                .line
-                .push((cached_glyph, (glyph.start, glyph.end)));
-        }
-
-        self.glyphs.width = laid_out_line.w;
-    }
-
-    fn set_text(&mut self, text: String, rt: &mut dyn Runtime) {
-        if self.line.set_text(
-            text,
-            cosmic_text::LineEnding::None,
-            AttrsList::new(Attrs::new()),
-        ) {
-            self.layout_text(rt);
-        }
-    }
-}
-
-impl Component for Input {
-    fn draw(&mut self, point: Point, rt: &mut dyn Runtime) {
-        rt.draw_rect(
-            point.x,
-            point.y,
-            self.size.width,
-            self.size.height,
-            0.0,
-            0.0,
-            Color::black().blue(1.0),
-            Color::clear(),
-        );
-
-        for (glyph, _) in &self.glyphs.line {
-            if let Some(tex_position) = glyph.tex_position {
-                rt.draw_glyph(
-                    point.x + glyph.left,
-                    point.y - glyph.top,
-                    glyph.size,
-                    tex_position,
-                    self.color,
-                );
-            }
-        }
-
-        if let Some(cursor) = self.cursor {
-            let offset = if cursor == 0 {
-                0.0
-            } else {
-                let glyph = self.glyphs.line[cursor - 1].0;
-                glyph.left + glyph.size[0]
-            };
-
-            rt.draw_rect(
-                point.x + offset,
-                point.y,
-                2.0,
-                self.size.height,
-                0.0,
-                0.0,
-                Color {
-                    r: 0.0,
-                    g: 0.0,
-                    b: 0.0,
-                    a: 0.5,
-                },
-                Color::clear(),
-            );
-        }
-    }
-
-    fn click(&mut self, point: Point, rt: &mut dyn Runtime) -> bool {
-        if !self.size.contains(point) {
-            return false;
-        }
-
-        self.cursor = Some(
-            self.glyphs
-                .line
-                .iter()
-                .find_map(|(glyph, (start, end))| {
-                    if glyph.left <= point.x && point.x <= glyph.left + glyph.size[0] {
-                        Some(*start)
-                    } else {
-                        None
-                    }
-                })
-                .unwrap_or(self.line.text().len()),
-        );
-
-        true
-    }
-
-    fn mouse_up(&mut self, _: Point, _: &mut dyn Runtime) {}
-    fn mouse_move(&mut self, _: f32, _: f32, _: &mut dyn Runtime) {}
-
-    fn set_bounds(&mut self, bounds: Size, rt: &mut dyn Runtime) {
-        self.size = bounds;
-    }
-
-    fn key_pressed(&mut self, key: &str, rt: &mut dyn Runtime) {
-        let Some(cursor) = self.cursor else {
-            return;
-        };
-        let mut text = self.line.text().to_string();
-        text.insert_str(cursor, &key);
-        self.cursor = Some(cursor + key.len());
-        self.set_text(text, rt);
-        self.layout_text(rt);
-    }
-
-    fn size(&mut self, rt: &mut dyn Runtime) -> Size {
-        self.size
-    }
-}
+//     fn size(&mut self, rt: &mut dyn Runtime) -> Size {
+//         self.size
+//     }
+// }
 
 #[derive(Copy, Clone, Debug)]
 #[repr(C)]
@@ -421,17 +302,71 @@ pub trait Runtime {
 pub trait Component {
     fn draw(&mut self, point: Point, rt: &mut dyn Runtime);
     fn set_bounds(&mut self, bounds: Size, rt: &mut dyn Runtime);
-    fn size(&mut self, rt: &mut dyn Runtime) -> Size;
+    fn child_size_changed(&mut self, rt: &mut dyn Runtime);
+    fn size(&self) -> Size;
+    fn visit_children(&mut self, f: &mut dyn FnMut(Point, &mut dyn Component) -> bool);
 
     fn click(&mut self, point: Point, rt: &mut dyn Runtime) -> bool {
-        self.size(rt).contains(point)
+        if self.size().contains(point) {
+            self.handle_click(point, rt);
+            self.visit_children(&mut |offset, child| {
+                if child.click(point + offset, rt) {
+                    return true;
+                }
+                false
+            });
+            true
+        } else {
+            false
+        }
     }
 
-    fn mouse_up(&mut self, point: Point, rt: &mut dyn Runtime);
+    fn mouse_up(&mut self, point: Point, rt: &mut dyn Runtime) {
+        self.handle_mouse_up(point, rt);
+        self.visit_children(&mut |offset, child| {
+            child.mouse_up(point + offset, rt);
+            false
+        });
+    }
 
-    fn mouse_move(&mut self, dx: f32, dy: f32, rt: &mut dyn Runtime);
+    fn mouse_move(&mut self, dx: f32, dy: f32, rt: &mut dyn Runtime) {
+        self.handle_mouse_move(dx, dy, rt);
+        self.visit_children(&mut |_, child| {
+            child.mouse_move(dx, dy, rt);
+            false
+        });
+    }
 
-    fn key_pressed(&mut self, key: &str, rt: &mut dyn Runtime);
+    fn key_pressed(&mut self, key: &str, rt: &mut dyn Runtime) {
+        self.handle_key_pressed(key, rt);
+        self.visit_children(&mut |_, child| {
+            child.key_pressed(key, rt);
+            false
+        });
+    }
+
+    fn scroll(&mut self, dx: f32, dy: f32, rt: &mut dyn Runtime) {
+        self.handle_scroll(dx, dy, rt);
+        self.visit_children(&mut |_, child| {
+            child.scroll(dx, dy, rt);
+            false
+        });
+    }
+
+    #[allow(unused_variables)]
+    fn handle_click(&mut self, point: Point, rt: &mut dyn Runtime) {}
+
+    #[allow(unused_variables)]
+    fn handle_mouse_up(&mut self, point: Point, rt: &mut dyn Runtime) {}
+
+    #[allow(unused_variables)]
+    fn handle_mouse_move(&mut self, dx: f32, dy: f32, rt: &mut dyn Runtime) {}
+
+    #[allow(unused_variables)]
+    fn handle_key_pressed(&mut self, key: &str, rt: &mut dyn Runtime) {}
+
+    #[allow(unused_variables)]
+    fn handle_scroll(&mut self, dx: f32, dy: f32, rt: &mut dyn Runtime) {}
 }
 
 enum Sizing {
@@ -449,11 +384,8 @@ struct Button {
 }
 
 impl Button {
-    fn new(width: f32, height: f32, text: String, bounds: Size, rt: &mut dyn Runtime) -> Self {
-        let size = Size {
-            width: width.min(bounds.width),
-            height: height.min(bounds.height),
-        };
+    fn new(width: f32, height: f32, text: String) -> Self {
+        let size = Size { width, height };
 
         Self {
             width,
@@ -461,7 +393,6 @@ impl Button {
             size,
             text: Text::new(
                 text,
-                size,
                 Color {
                     r: 0.0,
                     g: 0.0,
@@ -469,7 +400,6 @@ impl Button {
                     a: 1.0,
                 },
                 AxisAlignment::Center,
-                rt,
             ),
             _on_click: None,
         }
@@ -497,22 +427,11 @@ impl Component for Button {
         self.text.draw(point, rt);
     }
 
-    fn click(&mut self, point: Point, rt: &mut dyn Runtime) -> bool {
-        if self.size.contains(point) {
-            if let Some(on_click) = &mut self._on_click {
-                (on_click)();
-            }
-
-            true
-        } else {
-            false
+    fn handle_click(&mut self, _: Point, _: &mut dyn Runtime) {
+        if let Some(on_click) = &mut self._on_click {
+            (on_click)();
         }
     }
-
-    fn mouse_up(&mut self, _: Point, _: &mut dyn Runtime) {}
-    fn mouse_move(&mut self, _: f32, _: f32, _: &mut dyn Runtime) {}
-
-    fn key_pressed(&mut self, key: &str, rt: &mut dyn Runtime) {}
 
     fn set_bounds(&mut self, bounds: Size, rt: &mut dyn Runtime) {
         self.size = Size {
@@ -522,7 +441,12 @@ impl Component for Button {
         self.text.set_bounds(self.size, rt);
     }
 
-    fn size(&mut self, rt: &mut dyn Runtime) -> Size {
+    fn child_size_changed(&mut self, _: &mut dyn Runtime) {}
+    fn visit_children(&mut self, f: &mut dyn FnMut(Point, &mut dyn Component) -> bool) {
+        f(Point { x: 0.0, y: 0.0 }, &mut self.text);
+    }
+
+    fn size(&self) -> Size {
         self.size
     }
 }
@@ -534,13 +458,13 @@ pub struct Align<C> {
 }
 
 impl<C: Component> Align<C> {
-    pub fn new(inner: C, size: Size) -> Self {
+    pub fn new(inner: C) -> Self {
         Self {
             alignment: Alignment {
                 horizontal: AxisAlignment::Start,
                 vertical: AxisAlignment::Start,
             },
-            size,
+            size: Size::ZERO,
             inner,
         }
     }
@@ -550,16 +474,16 @@ impl<C: Component> Align<C> {
         self
     }
 
-    fn inner_offset(&mut self, rt: &mut dyn Runtime) -> Point {
+    fn inner_offset(&self) -> Point {
         let x = match self.alignment.horizontal {
             AxisAlignment::Start => 0.0,
-            AxisAlignment::Center => (self.size.width - self.inner.size(rt).width) / 2.0,
-            AxisAlignment::End => self.size.width - self.inner.size(rt).width,
+            AxisAlignment::Center => (self.size.width - self.inner.size().width) / 2.0,
+            AxisAlignment::End => self.size.width - self.inner.size().width,
         };
         let y = match self.alignment.vertical {
             AxisAlignment::Start => 0.0,
-            AxisAlignment::Center => (self.size.height - self.inner.size(rt).height) / 2.0,
-            AxisAlignment::End => self.size.height - self.inner.size(rt).height,
+            AxisAlignment::Center => (self.size.height - self.inner.size().height) / 2.0,
+            AxisAlignment::End => self.size.height - self.inner.size().height,
         };
 
         Point { x, y }
@@ -578,11 +502,11 @@ struct Rect<C> {
 }
 
 impl<C: Component> Rect<C> {
-    pub fn new(inner: C, bounds: Size) -> Self {
+    pub fn new(inner: C) -> Self {
         Self {
             width: Sizing::Auto,
             height: Sizing::Auto,
-            size: bounds,
+            size: Size::ZERO,
             inner,
             border_width: 0.0,
             corner_radius: 0.0,
@@ -630,12 +554,12 @@ impl<C: Component> Component for Rect<C> {
     fn set_bounds(&mut self, bounds: Size, rt: &mut dyn Runtime) {
         self.size = Size {
             width: bounds.width.min(match self.width {
-                Sizing::Auto => self.inner.size(rt).width,
+                Sizing::Auto => self.inner.size().width,
                 Sizing::Full => bounds.width,
                 Sizing::Value(width) => width,
             }),
             height: bounds.height.min(match self.height {
-                Sizing::Auto => self.inner.size(rt).height,
+                Sizing::Auto => self.inner.size().height,
                 Sizing::Full => bounds.height,
                 Sizing::Value(height) => height,
             }),
@@ -643,30 +567,20 @@ impl<C: Component> Component for Rect<C> {
         self.inner.set_bounds(self.size, rt);
     }
 
-    fn click(&mut self, point: Point, rt: &mut dyn Runtime) -> bool {
-        self.inner.click(point, rt)
+    fn child_size_changed(&mut self, _: &mut dyn Runtime) {}
+
+    fn visit_children(&mut self, f: &mut dyn FnMut(Point, &mut dyn Component) -> bool) {
+        f(Point { x: 0.0, y: 0.0 }, &mut self.inner);
     }
 
-    fn mouse_up(&mut self, point: Point, rt: &mut dyn Runtime) {
-        self.inner.mouse_up(point, rt)
-    }
-
-    fn mouse_move(&mut self, dx: f32, dy: f32, rt: &mut dyn Runtime) {
-        self.inner.mouse_move(dx, dy, rt)
-    }
-
-    fn key_pressed(&mut self, key: &str, rt: &mut dyn Runtime) {
-        self.inner.key_pressed(key, rt)
-    }
-
-    fn size(&mut self, rt: &mut dyn Runtime) -> Size {
+    fn size(&self) -> Size {
         self.size
     }
 }
 
 impl<C: Component> Component for Align<C> {
     fn draw(&mut self, point: Point, rt: &mut dyn Runtime) {
-        let inner_offset = self.inner_offset(rt);
+        let inner_offset = self.inner_offset();
         self.inner.draw(point + inner_offset, rt)
     }
 
@@ -675,26 +589,13 @@ impl<C: Component> Component for Align<C> {
         self.size = bounds;
     }
 
-    fn click(&mut self, point: Point, rt: &mut dyn Runtime) -> bool {
-        self.size.contains(point) && {
-            let inner_offset = self.inner_offset(rt);
-            self.inner.click(point + inner_offset, rt)
-        }
+    fn visit_children(&mut self, f: &mut dyn FnMut(Point, &mut dyn Component) -> bool) {
+        f(self.inner_offset(), &mut self.inner);
     }
 
-    fn mouse_up(&mut self, point: Point, rt: &mut dyn Runtime) {
-        self.inner.mouse_up(point, rt)
-    }
+    fn child_size_changed(&mut self, _: &mut dyn Runtime) {}
 
-    fn mouse_move(&mut self, dx: f32, dy: f32, rt: &mut dyn Runtime) {
-        self.inner.mouse_move(dx, dy, rt)
-    }
-
-    fn key_pressed(&mut self, key: &str, rt: &mut dyn Runtime) {
-        self.inner.key_pressed(key, rt)
-    }
-
-    fn size(&mut self, rt: &mut dyn Runtime) -> Size {
+    fn size(&self) -> Size {
         self.size
     }
 }
@@ -714,16 +615,14 @@ impl<C1: Component, C2: Component> ResizableCols<C1, C2> {
         self.col1_width + self.col2_width + self.spacer_width
     }
 
-    pub fn new(col1: C1, col2: C2, spacer_width: f32, bounds: Size, rt: &mut dyn Runtime) -> Self {
-        let total_width = bounds.width - spacer_width;
-
+    pub fn new(col1: C1, col2: C2, spacer_width: f32) -> Self {
         Self {
             col1,
             col2,
             spacer_width,
-            col1_width: total_width / 2.0,
-            col2_width: total_width / 2.0,
-            height: bounds.height,
+            col1_width: 1.0,
+            col2_width: 1.0,
+            height: 0.0,
             dragging: false,
         }
     }
@@ -795,7 +694,13 @@ impl<C1: Component, C2: Component> Component for ResizableCols<C1, C2> {
         if point.x >= self.col1_width + self.spacer_width
             && point.x <= self.col1_width + self.spacer_width + self.col2_width
         {
-            return self.col2.click(point, rt);
+            return self.col2.click(
+                Point {
+                    x: point.x - self.col1_width - self.spacer_width,
+                    y: point.y,
+                },
+                rt,
+            );
         }
 
         false
@@ -807,7 +712,7 @@ impl<C1: Component, C2: Component> Component for ResizableCols<C1, C2> {
         self.col2.mouse_up(point, rt);
     }
 
-    fn mouse_move(&mut self, dx: f32, dy: f32, rt: &mut dyn Runtime) {
+    fn handle_mouse_move(&mut self, dx: f32, dy: f32, rt: &mut dyn Runtime) {
         let mut diff = dx;
 
         if dx < 0.0 {
@@ -836,17 +741,22 @@ impl<C1: Component, C2: Component> Component for ResizableCols<C1, C2> {
                 rt,
             );
         }
-
-        self.col1.mouse_move(dx, dy, rt);
-        self.col2.mouse_move(dx, dy, rt);
     }
 
-    fn key_pressed(&mut self, key: &str, rt: &mut dyn Runtime) {
-        self.col1.key_pressed(key, rt);
-        self.col2.key_pressed(key, rt);
+    fn child_size_changed(&mut self, rt: &mut dyn Runtime) {}
+
+    fn visit_children(&mut self, f: &mut dyn FnMut(Point, &mut dyn Component) -> bool) {
+        f(Point { x: 0.0, y: 0.0 }, &mut self.col1);
+        f(
+            Point {
+                x: self.col1_width + self.spacer_width,
+                y: 0.0,
+            },
+            &mut self.col2,
+        );
     }
 
-    fn size(&mut self, rt: &mut dyn Runtime) -> Size {
+    fn size(&self) -> Size {
         Size {
             width: self.width(),
             height: self.height,
@@ -855,8 +765,8 @@ impl<C1: Component, C2: Component> Component for ResizableCols<C1, C2> {
 }
 
 pub struct App {
-    columns: ResizableCols<Button, Rows<Text>>,
-    file_tree: Vec<FileTree>,
+    columns: ResizableCols<Button, FileForest>,
+    pending_renames: Option<Vec<PathBuf>>,
 }
 
 impl Component for App {
@@ -864,124 +774,607 @@ impl Component for App {
         self.columns.draw(point, rt);
     }
 
-    fn click(&mut self, point: Point, rt: &mut dyn Runtime) -> bool {
-        self.columns.click(point, rt)
-    }
-
-    fn mouse_up(&mut self, point: Point, rt: &mut dyn Runtime) {
-        self.columns.mouse_up(point, rt);
-    }
-
-    fn mouse_move(&mut self, dx: f32, dy: f32, rt: &mut dyn Runtime) {
-        self.columns.mouse_move(dx, dy, rt);
+    fn visit_children(&mut self, f: &mut dyn FnMut(Point, &mut dyn Component) -> bool) {
+        f(Point { x: 0.0, y: 0.0 }, &mut self.columns);
     }
 
     fn set_bounds(&mut self, bounds: Size, rt: &mut dyn Runtime) {
         self.columns.set_bounds(bounds, rt);
     }
 
-    fn key_pressed(&mut self, key: &str, rt: &mut dyn Runtime) {
-        self.columns.key_pressed(key, rt);
-    }
+    fn child_size_changed(&mut self, rt: &mut dyn Runtime) {}
 
-    fn size(&mut self, rt: &mut dyn Runtime) -> Size {
-        Size {
-            width: 0.0,
-            height: 0.0,
-        }
+    fn size(&self) -> Size {
+        self.columns.size()
     }
+}
+
+pub struct FileForest {
+    file_trees: Vec<FileTree>,
+    root: PathBuf,
+    width: f32,
+    inner_height: f32,
+    scroll_offset: f32,
+}
+
+enum Children {
+    None,
+    Inline(Vec<FileTree>),
+    Collapsed(Vec<FileTree>),
 }
 
 pub struct FileTree {
     name: OsString,
-    children: Vec<FileTree>,
-    expanded: bool,
+    text: Text,
+    children: Children,
+    depth: usize,
 }
 
 impl FileTree {
-    pub fn from_path(path: impl AsRef<std::path::Path>) -> Vec<Self> {
+    pub fn set_name(&mut self, name: OsString, rt: &mut dyn Runtime) {
+        self.text.set_text(&name.to_string_lossy(), rt);
+        self.name = name;
+    }
+}
+
+impl FileForest {
+    pub fn from_path(path: impl AsRef<std::path::Path>) -> Self {
+        let root = path.as_ref().to_path_buf();
+        let mut this = Self::from_path_inner(path, 0);
+        this.root = root;
+        this
+    }
+
+    pub fn from_path_inner(path: impl AsRef<std::path::Path>, depth: usize) -> Self {
         let mut roots = vec![];
 
         for entry in std::fs::read_dir(path).unwrap() {
             let entry = entry.unwrap();
             let path = entry.path();
-            let name = path.file_name().unwrap().to_owned();
+            let name = entry.file_name();
 
             if name != ".git" {
-                roots.push(Self {
+                roots.push(FileTree {
+                    text: Text::new(
+                        name.to_string_lossy().to_string(),
+                        Color::black().red(1.0),
+                        AxisAlignment::Start,
+                    ),
                     name,
                     children: if path.is_dir() {
-                        Self::from_path(path)
+                        Children::Collapsed(Self::from_path_inner(path, depth + 1).file_trees)
                     } else {
-                        vec![]
+                        Children::None
                     },
-                    expanded: false,
+                    depth,
                 });
             }
         }
 
-        roots
+        Self {
+            file_trees: roots,
+            width: 0.0,
+            inner_height: 0.0,
+            scroll_offset: 0.0,
+            root: PathBuf::new(),
+        }
+    }
+
+    pub fn add_files(&mut self, files: &[PathBuf], rt: &mut dyn Runtime) {
+        for file in files {
+            let meta = fs::metadata(&file);
+            let is_dir = match meta {
+                Ok(meta) => meta.is_dir(),
+                Err(error) => {
+                    eprintln!("Error getting metadata for {}: {}", file.display(), error);
+                    continue;
+                }
+            };
+            let Some(path) = self.strip_root(file) else {
+                continue;
+            };
+            let mut components: Vec<_> = path.components().collect();
+            let width = self.width;
+
+            let Some(path::Component::Normal(name)) = components.pop() else {
+                panic!("Missing file name");
+            };
+
+            let name_string = name.to_string_lossy().to_string();
+            let mut text = Text::new(name_string, Color::black().red(1.0), AxisAlignment::Start);
+            text.set_bounds(
+                Size {
+                    width,
+                    height: 50.0,
+                },
+                rt,
+            );
+
+            let mut new_tree = FileTree {
+                text,
+                name: name.to_os_string(),
+                children: if is_dir {
+                    Children::Collapsed(vec![])
+                } else {
+                    Children::None
+                },
+                depth: 0,
+            };
+
+            if components.is_empty() {
+                self.file_trees.push(new_tree);
+            } else {
+                let Some((start, i, trees)) = self.find_node_idx(&components) else {
+                    continue;
+                };
+
+                new_tree.depth = i;
+
+                match &mut trees[start].children {
+                    Children::None => {
+                        panic!("Expected children");
+                    }
+                    Children::Inline(_) => {
+                        trees.insert(start + 1, new_tree);
+                    }
+                    Children::Collapsed(children) => {
+                        children.push(new_tree);
+                    }
+                };
+            }
+        }
+        self.clamp_scroll_offset();
+    }
+
+    pub fn remove_files(&mut self, files: &[PathBuf]) {
+        for file in files {
+            let Some(path) = self.strip_root(file) else {
+                continue;
+            };
+
+            let components: Vec<_> = path.components().collect();
+            let Some((start, _, trees)) = self.find_node_idx(&components) else {
+                continue;
+            };
+
+            Self::remove_tree(trees, start);
+        }
+        self.clamp_scroll_offset();
+    }
+
+    pub fn rename_file(
+        &mut self,
+        old_file: &path::Path,
+        new_file: &path::Path,
+        rt: &mut dyn Runtime,
+    ) {
+        let Some(old_path) = self.strip_root(old_file) else {
+            return;
+        };
+        let Some(new_path) = self.strip_root(new_file) else {
+            return;
+        };
+
+        let old_parent = old_path.parent();
+        let new_parent = new_path.parent();
+
+        if old_parent != new_parent {
+            eprintln!(
+                "Cannot rename file {} to {}: Parents do not match",
+                old_path.display(),
+                new_path.display()
+            );
+            return;
+        }
+
+        let components: Vec<_> = old_path.components().collect();
+        let Some((start, _, trees)) = self.find_node_idx(&components) else {
+            return;
+        };
+
+        let Some(new_name) = new_path.file_name() else {
+            eprintln!("New path has no file name");
+            return;
+        };
+
+        trees[start].set_name(new_name.to_owned(), rt);
+    }
+
+    pub fn rescan_files(&mut self, rt: &mut dyn Runtime) {
+        Self::rescan_directory(&mut self.file_trees, 0, &self.root, self.width, rt);
+    }
+
+    pub fn rescan_directory(
+        trees: &mut Vec<FileTree>,
+        mut start: usize,
+        path: &path::Path,
+        width: f32,
+        rt: &mut dyn Runtime,
+    ) {
+        let mut entries: Vec<_> = std::fs::read_dir(path)
+            .unwrap()
+            .map(Result::unwrap)
+            .map(|entry| (entry.file_name(), entry, false))
+            .filter(|(name, _, _)| name != ".git")
+            .collect();
+
+        let depth = trees[start].depth;
+        'trees: while start < trees.len() && trees[start].depth >= depth {
+            let tree = &mut trees[start];
+            if tree.depth > depth {
+                start += 1;
+                continue;
+            }
+
+            for (name, entry, found) in &mut entries {
+                if name == &tree.name {
+                    *found = true;
+                    start += 1;
+                    match &mut tree.children {
+                        Children::None => {}
+                        Children::Inline(_) => {
+                            if trees[start].depth == depth + 1 {
+                                Self::rescan_directory(trees, start, &entry.path(), width, rt);
+                            }
+                        }
+                        Children::Collapsed(children) => {
+                            if !children.is_empty() {
+                                Self::rescan_directory(children, 0, &entry.path(), width, rt);
+                            }
+                        }
+                    }
+                    continue 'trees;
+                }
+            }
+
+            Self::remove_tree(trees, start);
+        }
+
+        for (name, entry, found) in entries {
+            if !found {
+                let path = entry.path();
+                let mut text = Text::new(
+                    name.to_string_lossy().to_string(),
+                    Color::black().red(1.0),
+                    AxisAlignment::Start,
+                );
+                text.set_bounds(
+                    Size {
+                        width,
+                        height: 50.0,
+                    },
+                    rt,
+                );
+                trees.insert(
+                    start,
+                    FileTree {
+                        text,
+                        name,
+                        children: if path.is_dir() {
+                            Children::Collapsed(
+                                FileForest::from_path_inner(path, depth + 1).file_trees,
+                            )
+                        } else {
+                            Children::None
+                        },
+                        depth,
+                    },
+                )
+            }
+        }
+    }
+
+    fn remove_tree(trees: &mut Vec<FileTree>, start: usize) {
+        if let Children::Inline(_) = &trees[start].children {
+            let depth = trees[start].depth;
+            let child_count = trees[(start + 1)..]
+                .iter()
+                .take_while(|tree| tree.depth > depth)
+                .count();
+            trees.splice(start..(start + 1 + child_count), iter::empty());
+        } else {
+            trees.remove(start);
+        }
+    }
+
+    fn strip_root<'p>(&self, file: &'p path::Path) -> Option<&'p path::Path> {
+        if let Ok(path) = file.strip_prefix(&self.root) {
+            Some(path)
+        } else {
+            eprintln!(
+                "File {} is not in root: {}",
+                file.display(),
+                self.root.display()
+            );
+            None
+        }
+    }
+
+    fn find_node_idx(
+        &mut self,
+        components: &[path::Component],
+    ) -> Option<(usize, usize, &mut Vec<FileTree>)> {
+        let mut i = 0;
+        let mut start = 0;
+        let mut trees = &mut self.file_trees;
+        loop {
+            let path::Component::Normal(name) = &components[i] else {
+                panic!("Unexpected component {:?}", components[i]);
+            };
+
+            eprintln!("looking for {}", name.to_string_lossy());
+            let parent_idx = trees[start..]
+                .iter_mut()
+                .take_while(|file_tree| file_tree.depth >= i)
+                .position(|file_tree| file_tree.depth == i && file_tree.name == *name);
+
+            if let Some(parent_idx) = parent_idx {
+                start += parent_idx;
+                i += 1;
+                if i == components.len() {
+                    dbg!((start, i));
+                    return Some((start, i, trees));
+                }
+
+                let get_children = match &mut trees[start].children {
+                    Children::None => {
+                        panic!("Expected children");
+                    }
+                    Children::Inline(_) => {
+                        start += 1;
+                        false
+                    }
+                    Children::Collapsed(_) => {
+                        // trees = children;
+                        true
+                    }
+                };
+                if get_children {
+                    let Children::Collapsed(children) = &mut trees[start].children else {
+                        unreachable!()
+                    };
+                    start = 0;
+                    trees = children;
+                }
+            } else {
+                eprintln!(
+                    "File {:?} is not in intermediate path: {}",
+                    &components,
+                    self.root.display()
+                );
+                return None;
+            }
+        }
+    }
+
+    fn clamp_scroll_offset(&mut self) {
+        self.scroll_offset = self
+            .scroll_offset
+            .max(0.0)
+            .min((self.file_trees.len() as f32 * 50.0 - self.inner_height).max(0.0));
+    }
+}
+
+impl Component for FileForest {
+    fn draw(&mut self, point: Point, rt: &mut dyn Runtime) {
+        self.visit_children(&mut |offset, child| {
+            child.draw(offset + point, rt);
+            false
+        });
+
+        let scroll_height = self.file_trees.len() as f32 * 50.0;
+        if scroll_height > self.inner_height {
+            let bar_height = self.inner_height / scroll_height * self.inner_height;
+            let max_scroll_offset = scroll_height - self.inner_height;
+            rt.draw_rect(
+                point.x + self.width - 20.0,
+                point.y
+                    + (self.inner_height - bar_height) * (self.scroll_offset / max_scroll_offset),
+                20.0,
+                bar_height,
+                4.0,
+                0.0,
+                Color::black().green(1.0),
+                Color::clear(),
+            );
+        }
+    }
+
+    fn visit_children(&mut self, f: &mut dyn FnMut(Point, &mut dyn Component) -> bool) {
+        for (i, file_tree) in self.file_trees.iter_mut().enumerate() {
+            f(
+                Point {
+                    x: file_tree.depth as f32 * 20.0,
+                    y: i as f32 * 50.0 - self.scroll_offset,
+                },
+                &mut file_tree.text,
+            );
+        }
+    }
+
+    fn set_bounds(&mut self, bounds: Size, rt: &mut dyn Runtime) {
+        self.width = bounds.width;
+        self.inner_height = bounds.height;
+        for file_tree in self.file_trees.iter_mut() {
+            file_tree.text.set_bounds(
+                Size {
+                    width: bounds.width,
+                    height: 50.0,
+                },
+                rt,
+            );
+        }
+    }
+
+    fn child_size_changed(&mut self, rt: &mut dyn Runtime) {}
+
+    fn size(&self) -> Size {
+        Size {
+            width: self.width,
+            height: self.inner_height,
+        }
+    }
+
+    fn handle_click(&mut self, point: Point, rt: &mut dyn Runtime) {
+        let i = ((point.y + self.scroll_offset) / 50.0).floor() as usize;
+        if i < self.file_trees.len() {
+            let file_tree = &mut self.file_trees[i];
+            match &mut file_tree.children {
+                Children::None => {}
+                Children::Inline(empty) => {
+                    let mut empty = mem::take(empty);
+                    let depth = file_tree.depth;
+                    let child_count = self.file_trees[(i + 1)..]
+                        .iter()
+                        .take_while(|tree| tree.depth > depth)
+                        .count();
+
+                    empty.extend(
+                        self.file_trees
+                            .splice((i + 1)..(i + 1 + child_count), iter::empty()),
+                    );
+                    self.file_trees[i].children = Children::Collapsed(empty);
+                }
+                Children::Collapsed(children) => {
+                    let mut children = mem::take(children);
+                    for child in &mut children {
+                        child.text.set_bounds(
+                            Size {
+                                width: self.width,
+                                height: 50.0,
+                            },
+                            rt,
+                        );
+                    }
+
+                    self.file_trees.splice((i + 1)..(i + 1), children.drain(..));
+                    self.file_trees[i].children = Children::Inline(children);
+                }
+            }
+            self.clamp_scroll_offset();
+        }
+    }
+
+    fn handle_scroll(&mut self, dx: f32, dy: f32, rt: &mut dyn Runtime) {
+        self.scroll_offset -= dy;
+        self.clamp_scroll_offset();
+    }
+
+    fn handle_key_pressed(&mut self, key: &str, rt: &mut dyn Runtime) {
+        if key == "r" {
+            eprintln!("Rescanning files");
+            self.rescan_files(rt);
+        }
     }
 }
 
 impl App {
-    pub fn new(bounds: Size, file_tree: Vec<FileTree>, rt: &mut dyn Runtime) -> Self {
+    pub fn new(file_forest: FileForest) -> Self {
         Self {
             columns: ResizableCols::new(
-                Button::new(100.0, 50.0, "Text 1".to_string(), bounds, rt),
-                Rows::new(Self::file_tree_to_rows(&file_tree, bounds, rt)),
+                Button::new(100.0, 50.0, "Text 1".to_string()),
+                file_forest,
                 10.0,
-                bounds,
-                rt,
             ),
-            file_tree,
+            pending_renames: None,
         }
     }
 
-    pub fn add_files(&mut self, files: &[PathBuf], rt: &mut dyn Runtime) {}
-
-    pub fn remove_files(&mut self, files: &[PathBuf], rt: &mut dyn Runtime) {}
-
-    fn rerender_file_tree(&mut self, rt: &mut dyn Runtime) {
-        self.columns.col2.set_rows(Self::file_tree_to_rows(
-            &self.file_tree,
-            Size {
-                width: 100.0,
-                height: 100.0,
-            },
-            rt,
-        ))
+    pub fn add_files(&mut self, files: &[PathBuf], rt: &mut dyn Runtime) {
+        self.columns.col2.add_files(files, rt);
     }
 
-    fn file_tree_to_rows(file_tree: &[FileTree], size: Size, rt: &mut dyn Runtime) -> Vec<Text> {
-        let mut rows = vec![];
-        for file_tree in file_tree {
-            Self::insert_file_tree(file_tree, &mut rows, size, rt);
+    pub fn remove_files(&mut self, files: &[PathBuf], rt: &mut dyn Runtime) {
+        self.columns.col2.remove_files(files);
+    }
+
+    pub fn rename_from(&mut self, paths: Vec<PathBuf>) {
+        if let Some(pending_renames) = &self.pending_renames {
+            eprintln!("Dropping pending renames: {:?}", pending_renames);
         }
-        rows.truncate(35);
-        rows
+
+        self.pending_renames = Some(paths);
     }
 
-    fn insert_file_tree(
-        file_tree: &FileTree,
-        rows: &mut Vec<Text>,
-        size: Size,
-        rt: &mut dyn Runtime,
-    ) {
-        rows.push(Text::new(
-            file_tree.name.to_string_lossy().to_string(),
-            size,
-            Color::black().red(1.0),
-            AxisAlignment::Center,
-            rt,
-        ));
+    pub fn rename_to(&mut self, paths: Vec<PathBuf>, rt: &mut dyn Runtime) {
+        let Some(pending_renames) = &mut self.pending_renames else {
+            eprintln!("No pending renames");
+            return;
+        };
 
-        if !file_tree.expanded {
+        if pending_renames.len() != paths.len() {
+            eprintln!(
+                "Renames have different lengths: {} != {}",
+                pending_renames.len(),
+                paths.len()
+            );
             return;
         }
 
-        for child in &file_tree.children {
-            Self::insert_file_tree(child, rows, size, rt);
+        for (old_path, new_path) in pending_renames.iter().zip(paths.iter()) {
+            self.columns.col2.rename_file(old_path, new_path, rt);
         }
+
+        self.pending_renames = None;
     }
+
+    pub fn rename_one(
+        &mut self,
+        old_path: &path::Path,
+        new_path: &path::Path,
+        rt: &mut dyn Runtime,
+    ) {
+        self.columns.col2.rename_file(old_path, new_path, rt);
+    }
+
+    pub fn rescan_files(&mut self, rt: &mut dyn Runtime) {
+        self.columns.col2.rescan_files(rt);
+    }
+
+    // fn rerender_file_tree(&mut self, rt: &mut dyn Runtime) {
+    //     self.columns.col2.set_rows(Self::file_forest_to_rows(
+    //         &self.file_forest,
+    //         Size {
+    //             width: 100.0,
+    //             height: 100.0,
+    //         },
+    //         rt,
+    //     ))
+    // }
+
+    // fn file_forest_to_rows(
+    //     file_forest: &FileForest,
+    //     size: Size,
+    //     rt: &mut dyn Runtime,
+    // ) -> Vec<Text> {
+    //     let mut rows = vec![];
+    //     for file_tree in &file_forest.file_trees {
+    //         Self::insert_file_tree(file_tree, &mut rows, size, rt);
+    //     }
+    //     rows.truncate(35);
+    //     rows
+    // }
+
+    // fn insert_file_tree(
+    //     file_tree: &FileTree,
+    //     rows: &mut Vec<Text>,
+    //     size: Size,
+    //     rt: &mut dyn Runtime,
+    // ) {
+    //     rows.push(Text::new(
+    //         file_tree.name.to_string_lossy().to_string(),
+    //         size,
+    //         Color::black().red(1.0),
+    //         AxisAlignment::Center,
+    //         rt,
+    //     ));
+
+    //     if !file_tree.expanded {
+    //         return;
+    //     }
+
+    //     for child in &file_tree.children {
+    //         Self::insert_file_tree(child, rows, size, rt);
+    //     }
+    // }
 }

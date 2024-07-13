@@ -20,6 +20,7 @@ use ash::vk::DescriptorType;
 use ash::vk::PipelineVertexInputStateCreateInfo;
 use ash::vk::ShaderStageFlags;
 use cosmic_text::ttf_parser::head;
+use notify::event;
 use notify::Watcher;
 use static_ui::Color;
 use static_ui::Component;
@@ -27,6 +28,7 @@ use static_ui::Component;
 use winit::event::ElementState;
 use winit::event::Event;
 use winit::event::KeyEvent;
+use winit::event::MouseScrollDelta;
 use winit::event::WindowEvent;
 use winit::event_loop::ControlFlow;
 use winit::event_loop::EventLoop;
@@ -1535,24 +1537,28 @@ fn main() -> Result<(), Box<dyn Error>> {
             })
             .unwrap();
 
+        let current_dir = std::env::current_dir().unwrap();
+
         watcher
-            .watch(std::path::Path::new("."), notify::RecursiveMode::Recursive)
+            .watch(&current_dir, notify::RecursiveMode::Recursive)
             .unwrap();
 
-        let file_tree = static_ui::FileTree::from_path(".");
+        let file_tree = static_ui::FileForest::from_path(&current_dir);
 
-        let mut app_ui = static_ui::App::new(
+        let mut app_ui = static_ui::App::new(file_tree);
+
+        app_ui.set_bounds(
             static_ui::Size {
                 width: window.inner_size().width as f32,
                 height: window.inner_size().height as f32,
             },
-            file_tree,
             &mut renderer,
         );
 
         event_loop
             .run(move |event, elwp| {
                 elwp.set_control_flow(ControlFlow::Wait);
+
                 match event {
                     Event::WindowEvent {
                         event:
@@ -1631,6 +1637,17 @@ fn main() -> Result<(), Box<dyn Error>> {
                         window.request_redraw();
                     }
                     Event::WindowEvent {
+                        event:
+                            WindowEvent::MouseWheel {
+                                delta: MouseScrollDelta::LineDelta(dx, dy),
+                                ..
+                            },
+                        ..
+                    } => {
+                        app_ui.scroll(dx * 100.0, dy * 100.0, &mut renderer);
+                        window.request_redraw();
+                    }
+                    Event::WindowEvent {
                         event: WindowEvent::KeyboardInput { event, .. },
                         ..
                     } => {
@@ -1641,11 +1658,55 @@ fn main() -> Result<(), Box<dyn Error>> {
                             window.request_redraw();
                         }
                     }
-                    Event::UserEvent(event) => match event.kind {
-                        notify::EventKind::Create(_) => {}
-                        notify::EventKind::Remove(_) => {}
-                        _ => {}
-                    },
+                    Event::UserEvent(event) => {
+                        if event.need_rescan() {
+                            app_ui.rescan_files(&mut renderer);
+                        }
+
+                        eprintln!("Event: {:?}", event);
+                        match event.kind {
+                            notify::EventKind::Create(_) => {
+                                app_ui.add_files(&event.paths, &mut renderer);
+                                window.request_redraw();
+                            }
+                            notify::EventKind::Remove(_) => {
+                                app_ui.remove_files(&event.paths, &mut renderer);
+                                window.request_redraw();
+                            }
+                            notify::EventKind::Modify(notify::event::ModifyKind::Name(mode)) => {
+                                match mode {
+                                    notify::event::RenameMode::From => {
+                                        app_ui.rename_from(event.paths);
+                                        window.request_redraw();
+                                    }
+                                    notify::event::RenameMode::To => {
+                                        app_ui.rename_to(event.paths, &mut renderer);
+                                        window.request_redraw();
+                                    }
+                                    notify::event::RenameMode::Both => {
+                                        if event.paths.len() != 2 {
+                                            eprintln!(
+                                                "Rename both mode has {} paths",
+                                                event.paths.len()
+                                            );
+                                            return;
+                                        }
+
+                                        app_ui.rename_one(
+                                            &event.paths[0],
+                                            &event.paths[1],
+                                            &mut renderer,
+                                        );
+                                        window.request_redraw();
+                                    }
+                                    mode => {
+                                        eprintln!("Unhandled rename mode: {:?}", mode);
+                                    }
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
                     _ => (),
                 }
             })
