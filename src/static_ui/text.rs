@@ -153,7 +153,7 @@ impl Text {
 }
 
 impl Component for Text {
-    fn draw(&mut self, point: Point, rt: &mut dyn Runtime) {
+    fn draw(&mut self, point: Point, cursor: Option<Point>, rt: &mut dyn Runtime) {
         let TextState::Cached(cached) = &mut self.inner else {
             panic!("Cannot draw text before layout");
         };

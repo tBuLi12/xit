@@ -15,7 +15,7 @@ impl<C: Component> Rows<C> {
 }
 
 impl<C: Component> Component for Rows<C> {
-    fn draw(&mut self, point: Point, rt: &mut dyn Runtime) {
+    fn draw(&mut self, point: Point, cursor: Option<Point>, rt: &mut dyn Runtime) {
         let mut y_offset = 0.0;
 
         for row in &mut self.rows {
@@ -24,6 +24,10 @@ impl<C: Component> Component for Rows<C> {
                     x: point.x,
                     y: point.y + y_offset,
                 },
+                cursor.map(|cursor| Point {
+                    x: cursor.x,
+                    y: cursor.y + y_offset,
+                }),
                 rt,
             );
             y_offset += row.size().height;

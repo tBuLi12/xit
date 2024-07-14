@@ -25,6 +25,7 @@ use notify::Watcher;
 use static_ui::Color;
 use static_ui::Component;
 
+use static_ui::Point;
 use winit::event::ElementState;
 use winit::event::Event;
 use winit::event::KeyEvent;
@@ -1542,6 +1543,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         watcher
             .watch(&current_dir, notify::RecursiveMode::Recursive)
             .unwrap();
+        watcher.unwatch(&current_dir.join(".git")).unwrap();
 
         let file_tree = static_ui::FileForest::from_path(&current_dir);
 
@@ -1581,7 +1583,14 @@ fn main() -> Result<(), Box<dyn Error>> {
                         ..
                     } => {
                         renderer.rectangles.clear();
-                        app_ui.draw(static_ui::Point { x: 0.0, y: 0.0 }, &mut renderer);
+                        app_ui.draw(
+                            static_ui::Point { x: 0.0, y: 0.0 },
+                            Some(Point {
+                                x: mouse_x,
+                                y: mouse_y,
+                            }),
+                            &mut renderer,
+                        );
                         renderer.draw_frame().unwrap();
                     }
                     Event::WindowEvent {
