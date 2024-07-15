@@ -379,11 +379,11 @@ impl Component for FileForest {
             let point = offset + point;
             child.draw(point, cursor.map(|cursor| cursor + offset), rt);
             if let Some(cursor) = cursor {
-                if cursor.x >= 0.0 && cursor.x <= width
-                // && cursor.y - point.y >= 0.0
-                // && cursor.y - point.y <= 50.0
+                if cursor.x >= 0.0
+                    && cursor.x <= width
+                    && cursor.y - point.y >= 0.0
+                    && cursor.y - point.y <= 50.0
                 {
-                    eprintln!("extra rect");
                     rt.draw_rect(
                         point.x,
                         point.y,
@@ -495,12 +495,5 @@ impl Component for FileForest {
     fn handle_scroll(&mut self, dx: f32, dy: f32, rt: &mut dyn Runtime) {
         self.scroll_offset -= dy;
         self.clamp_scroll_offset();
-    }
-
-    fn handle_key_pressed(&mut self, key: &str, rt: &mut dyn Runtime) {
-        if key == "r" {
-            eprintln!("Rescanning files");
-            self.rescan_files(rt);
-        }
     }
 }

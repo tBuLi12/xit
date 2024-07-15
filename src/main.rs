@@ -8,6 +8,8 @@ use std::hash::Hash;
 use std::io::Cursor;
 use std::mem;
 use std::mem::offset_of;
+use std::time::Duration;
+use std::time::Instant;
 
 use ash::ext::debug_utils;
 use ash::khr::surface;
@@ -76,6 +78,12 @@ struct Renderer {
     font_system: cosmic_text::FontSystem,
     swash_cache: cosmic_text::SwashCache,
     atlas: Atlas,
+    acquire_timer: Timer,
+    uniform_timer: Timer,
+    instance_timer: Timer,
+    record_and_submit_timer: Timer,
+    wait_timer: Timer,
+    present_timer: Timer,
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -515,7 +523,7 @@ impl Renderer {
             let surface_capabilities = surface_loader
                 .get_physical_device_surface_capabilities(physical_device, surface)
                 .unwrap();
-            let mut desired_image_count = surface_capabilities.min_image_count + 1;
+            let mut desired_image_count = surface_capabilities.min_image_count;
             if surface_capabilities.max_image_count > 0
                 && desired_image_count > surface_capabilities.max_image_count
             {
@@ -549,7 +557,7 @@ impl Renderer {
                 .iter()
                 .cloned()
                 .find(|&mode| mode == vk::PresentModeKHR::MAILBOX)
-                .unwrap_or(vk::PresentModeKHR::FIFO);
+                .unwrap_or(vk::PresentModeKHR::IMMEDIATE);
 
             let swapchain_loader = ash::khr::swapchain::Device::new(&instance, &device);
 
@@ -1001,12 +1009,19 @@ impl Renderer {
                 font_system,
                 swash_cache,
                 atlas,
+                acquire_timer: Timer::new("acquire_timer"),
+                instance_timer: Timer::new("instance"),
+                present_timer: Timer::new("present"),
+                record_and_submit_timer: Timer::new("record_and_submit"),
+                uniform_timer: Timer::new("uniform"),
+                wait_timer: Timer::new("wait"),
             })
         }
     }
 
     fn draw_frame(&mut self) -> Result<(), Box<dyn Error>> {
         unsafe {
+            let now = Instant::now();
             let (present_index, _) = self
                 .swapchain_stuff
                 .swapchain_loader
@@ -1017,6 +1032,7 @@ impl Renderer {
                     vk::Fence::null(),
                 )
                 .unwrap();
+            self.acquire_timer.add(now);
 
             let clear_values = [vk::ClearValue {
                 color: vk::ClearColorValue {
@@ -1030,6 +1046,7 @@ impl Renderer {
                 .render_area(self.swapchain_stuff.surface_resolution.into())
                 .clear_values(&clear_values);
 
+            let now = Instant::now();
             self.uniform_buffers[present_index as usize].copy_value(
                 &self.device,
                 ViewportSize {
@@ -1037,10 +1054,14 @@ impl Renderer {
                     height: self.swapchain_stuff.surface_resolution.height as f32,
                 },
             );
+            self.uniform_timer.add(now);
 
+            let now = Instant::now();
             self.instance_input_buffers[present_index as usize]
                 .copy_from_slice(&self.device, &self.rectangles);
+            self.instance_timer.add(now);
 
+            let now = Instant::now();
             record_submit_commandbuffer(
                 &self.device,
                 self.draw_command_buffer,
@@ -1085,6 +1106,8 @@ impl Renderer {
                     device.cmd_end_render_pass(draw_command_buffer);
                 },
             );
+            self.record_and_submit_timer.add(now);
+            let now = Instant::now();
             let wait_semaphors = [self.rendering_complete_semaphore];
             let swapchains = [self.swapchain_stuff.swapchain];
             let image_indices = [present_index];
@@ -1092,11 +1115,14 @@ impl Renderer {
                 .wait_semaphores(&wait_semaphors) // &rendering_complete_semaphore)
                 .swapchains(&swapchains)
                 .image_indices(&image_indices);
+            self.wait_timer.add(now);
 
+            let now = Instant::now();
             self.swapchain_stuff
                 .swapchain_loader
                 .queue_present(self.present_queue, &present_info)
                 .unwrap();
+            self.present_timer.add(now);
         }
 
         Ok(())
@@ -1148,6 +1174,8 @@ impl Renderer {
             self.swapchain_stuff.swapchain = new_swapchain;
             self.swapchain_stuff.present_images = new_present_images;
             self.swapchain_stuff.present_image_views = new_present_image_views;
+
+            eprintln!("image count {}", self.swapchain_stuff.present_images.len());
 
             self.swapchain_stuff.framebuffers = create_framebuffers(
                 &self.device,
@@ -1515,6 +1543,40 @@ impl static_ui::Runtime for Renderer {
     }
 }
 
+struct Timer {
+    count: u32,
+    last: Instant,
+    name: &'static str,
+}
+
+impl Timer {
+    pub fn new(name: &'static str) -> Self {
+        Self {
+            count: 0,
+            last: Instant::now(),
+            name,
+        }
+    }
+
+    pub fn add(&mut self, instant: Instant) {
+        // let new_duration = (duration + self.duration * self.count) / (self.count + 1);
+        // self.count += 1;
+        // self.duration = new_duration;
+
+        // if self.count > 100 {
+        //     eprintln!("timer {}: {:?}", self.name, self.duration);
+        //     *self = Self::new(self.name);
+        // }
+        eprintln!(
+            "timer {}: {:?}, last called {:?} ago",
+            self.name,
+            instant.elapsed(),
+            instant - self.last
+        );
+        self.last = instant;
+    }
+}
+
 fn main() -> Result<(), Box<dyn Error>> {
     unsafe {
         let event_loop = EventLoop::<notify::Event>::with_user_event().build()?;
@@ -1557,6 +1619,10 @@ fn main() -> Result<(), Box<dyn Error>> {
             &mut renderer,
         );
 
+        let mut timer = Timer::new("Process move event");
+        let mut draw_timer = Timer::new("Draw");
+        let mut submit_timer = Timer::new("Submit");
+
         event_loop
             .run(move |event, elwp| {
                 elwp.set_control_flow(ControlFlow::Wait);
@@ -1583,6 +1649,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                         ..
                     } => {
                         renderer.rectangles.clear();
+                        let now = Instant::now();
                         app_ui.draw(
                             static_ui::Point { x: 0.0, y: 0.0 },
                             Some(Point {
@@ -1591,7 +1658,10 @@ fn main() -> Result<(), Box<dyn Error>> {
                             }),
                             &mut renderer,
                         );
+                        draw_timer.add(now);
+                        let now = Instant::now();
                         renderer.draw_frame().unwrap();
+                        submit_timer.add(now);
                     }
                     Event::WindowEvent {
                         event: WindowEvent::Resized(size),
@@ -1610,11 +1680,14 @@ fn main() -> Result<(), Box<dyn Error>> {
                         event: WindowEvent::CursorMoved { position, .. },
                         ..
                     } => {
+                        let now = Instant::now();
+                        // eprintln!("cursor move at {:?}", now);
                         app_ui.mouse_move(
                             position.x as f32 - mouse_x,
                             position.y as f32 - mouse_y,
                             &mut renderer,
                         );
+                        timer.add(now);
                         mouse_x = position.x as f32;
                         mouse_y = position.y as f32;
                         window.request_redraw();

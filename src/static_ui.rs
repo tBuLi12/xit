@@ -657,7 +657,7 @@ impl<C1: Component, C2: Component> Component for ResizableCols<C1, C2> {
                 y: point.y,
             },
             cursor.map(|cursor| Point {
-                x: cursor.x + self.col1_width + self.spacer_width,
+                x: cursor.x - self.col1_width - self.spacer_width,
                 y: cursor.y,
             }),
             rt,
