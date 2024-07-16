@@ -299,7 +299,6 @@ pub trait Runtime {
         border_color: Color,
     );
     fn draw_glyph(&mut self, x: f32, y: f32, size: [f32; 2], tex_coords: [f32; 2], color: Color);
-    fn font_system(&mut self) -> &mut cosmic_text::FontSystem;
     fn get_glyph(&mut self, key: cosmic_text::CacheKey) -> Option<CachedGlyph>;
 }
 

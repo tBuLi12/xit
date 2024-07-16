@@ -3,8 +3,15 @@ use crate::CachedGlyph;
 use super::{AxisAlignment, Color, Component, Point, Runtime, Size};
 
 #[derive(Clone, Debug)]
+pub struct CachedCluster {
+    pub glyphs: Vec<CachedGlyph>,
+    pub start: usize,
+    pub end: usize,
+}
+
+#[derive(Clone, Debug)]
 pub struct CachedLine {
-    pub line: Vec<(CachedGlyph, (usize, usize))>,
+    pub line: Vec<CachedCluster>,
     pub width: f32,
 }
 

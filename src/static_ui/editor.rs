@@ -66,15 +66,17 @@ impl Line {
             self.layout_text(rt);
         }
 
-        for (glyph, _) in &self.glyphs.line {
-            if let Some(tex_position) = glyph.tex_position {
-                rt.draw_glyph(
-                    point.x + glyph.left,
-                    point.y - glyph.top - 20.0,
-                    glyph.size,
-                    tex_position,
-                    Color::black().red(1.0),
-                );
+        for cluster in &self.glyphs.line {
+            for glyph in &cluster.glyphs {
+                if let Some(tex_position) = glyph.tex_position {
+                    rt.draw_glyph(
+                        point.x + glyph.left,
+                        point.y - glyph.top - 20.0,
+                        glyph.size,
+                        tex_position,
+                        Color::black().red(1.0),
+                    );
+                }
             }
         }
     }
@@ -100,7 +102,7 @@ impl Component for Editor {
         let offset = if self.cursor.byte == 0 {
             0.0
         } else {
-            let glyph = self.lines[self.cursor.line].glyphs.line[self.cursor.byte - 1].0;
+            let glyph = self.lines[self.cursor.line].glyphs.line[self.cursor.character].glyphs;
             glyph.left + glyph.size[0]
         };
 

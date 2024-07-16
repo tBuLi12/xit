@@ -19,9 +19,7 @@ use ash::vk::DescriptorSetAllocateInfo;
 use ash::vk::DescriptorSetLayout;
 use ash::vk::DescriptorSetLayoutBinding;
 use ash::vk::DescriptorType;
-use ash::vk::PipelineVertexInputStateCreateInfo;
 use ash::vk::ShaderStageFlags;
-use cosmic_text::ttf_parser::head;
 use notify::event;
 use notify::Watcher;
 use static_ui::Color;
@@ -75,8 +73,9 @@ struct Renderer {
     fragment_shader_module: vk::ShaderModule,
     pre_transform: vk::SurfaceTransformFlagsKHR,
     present_mode: vk::PresentModeKHR,
-    font_system: cosmic_text::FontSystem,
-    swash_cache: cosmic_text::SwashCache,
+    shaping_context: swash::shape::ShapeContext,
+    scale_context: swash::scale::ScaleContext,
+    swash_image: swash::scale::image::Image,
     atlas: Atlas,
     acquire_timer: Timer,
     uniform_timer: Timer,
@@ -127,7 +126,7 @@ struct Atlas {
     sampler: vk::Sampler,
     current_texture_layout: vk::ImageLayout,
     upload_buffer: Buffer,
-    glyph_cache: HashMap<cosmic_text::CacheKey, CachedGlyph>,
+    glyph_cache: HashMap<swash::GlyphId, CachedGlyph>,
     allocator: etagere::BucketedAtlasAllocator,
 }
 
@@ -966,9 +965,6 @@ impl Renderer {
                 }
             }
 
-            let font_system = cosmic_text::FontSystem::new();
-            let swash_cache = cosmic_text::SwashCache::new();
-
             Ok(Self {
                 entry,
                 instance,
@@ -1006,8 +1002,7 @@ impl Renderer {
                     viewports,
                     scissors,
                 },
-                font_system,
-                swash_cache,
+
                 atlas,
                 acquire_timer: Timer::new("acquire_timer"),
                 instance_timer: Timer::new("instance"),
@@ -1468,56 +1463,63 @@ impl static_ui::Runtime for Renderer {
         })
     }
 
-    fn font_system(&mut self) -> &mut cosmic_text::FontSystem {
-        &mut self.font_system
-    }
-
-    fn get_glyph(&mut self, key: cosmic_text::CacheKey) -> Option<CachedGlyph> {
-        if let Some(glyph) = self.atlas.glyph_cache.get(&key) {
+    fn get_glyph(&mut self, id: swash::GlyphId) -> Option<CachedGlyph> {
+        if let Some(glyph) = self.atlas.glyph_cache.get(&id) {
             return Some(*glyph);
         }
 
-        let Some(image) = self
-            .swash_cache
-            .get_image_uncached(&mut self.font_system, key)
-        else {
+        use swash::zeno::{Format, Vector};
+        // Build the scaler
+        let mut scaler = self.scale_context.builder(*font).hint(true).build();
+
+        // Compute the fractional offset-- you'll likely want to quantize this
+        // in a real renderer
+        let offset = Vector::new(x.fract(), y.fract());
+        // Select our source order
+        if !swash::scale::Render::new(&[swash::scale::Source::Outline])
+            // Select a subpixel format
+            .format(Format::Subpixel)
+            // Apply the fractional offset
+            .offset(offset)
+            // Render the image
+            .render_into(&mut scaler, id, &mut self.swash_image)
+        {
             println!("No glyph");
             return None;
-        };
+        }
+
+        let placement = self.swash_image.placement;
 
         let mut glyph = CachedGlyph {
-            left: image.placement.left as f32,
-            top: image.placement.top as f32,
-            size: [image.placement.width as f32, image.placement.height as f32],
+            left: placement.left as f32,
+            top: placement.top as f32,
+            size: [placement.width as f32, placement.height as f32],
             tex_position: None,
         };
 
-        if image.data.len() == 0 {
+        if self.swash_image.data.len() == 0 {
             return Some(glyph);
         }
 
         let upload_buffer = self.atlas.upload_buffer;
-        if (upload_buffer.size as usize) < image.data.len() {
+        if (upload_buffer.size as usize) < self.swash_image.data.len() {
             panic!(
                 "Upload buffer too small {} < {}",
                 upload_buffer.size,
-                image.data.len()
+                self.swash_image.data.len()
             );
         }
 
-        upload_buffer.copy_from_slice(&self.device, &image.data);
+        upload_buffer.copy_from_slice(&self.device, &self.swash_image.data);
 
-        println!(
-            "allocating {}x{}",
-            image.placement.width, image.placement.height
-        );
+        println!("allocating {}x{}", placement.width, placement.height);
 
         let tex_glyph_rect = self
             .atlas
             .allocator
             .allocate(etagere::size2(
-                image.placement.width as i32,
-                image.placement.height as i32,
+                placement.width as i32,
+                placement.height as i32,
             ))
             .unwrap();
 
@@ -1529,7 +1531,7 @@ impl static_ui::Runtime for Renderer {
                 tex_glyph_rect.rectangle.min.x as u32,
                 tex_glyph_rect.rectangle.min.y as u32,
             ],
-            [image.placement.width, image.placement.height],
+            [placement.width, placement.height],
         );
 
         glyph.tex_position = Some([
@@ -1537,7 +1539,7 @@ impl static_ui::Runtime for Renderer {
             tex_glyph_rect.rectangle.min.y as f32,
         ]);
 
-        self.atlas.glyph_cache.insert(key, glyph);
+        self.atlas.glyph_cache.insert(id, glyph);
 
         Some(glyph)
     }
