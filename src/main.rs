@@ -1567,13 +1567,13 @@ impl Timer {
         //     eprintln!("timer {}: {:?}", self.name, self.duration);
         //     *self = Self::new(self.name);
         // }
-        eprintln!(
-            "timer {}: {:?}, last called {:?} ago",
-            self.name,
-            instant.elapsed(),
-            instant - self.last
-        );
-        self.last = instant;
+        // eprintln!(
+        //     "timer {}: {:?}, last called {:?} ago",
+        //     self.name,
+        //     instant.elapsed(),
+        //     instant - self.last
+        // );
+        // self.last = instant;
     }
 }
 

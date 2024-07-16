@@ -3,9 +3,9 @@ use crate::CachedGlyph;
 use super::{AxisAlignment, Color, Component, Point, Runtime, Size};
 
 #[derive(Clone, Debug)]
-struct CachedLine {
-    line: Vec<(CachedGlyph, (usize, usize))>,
-    width: f32,
+pub struct CachedLine {
+    pub line: Vec<(CachedGlyph, (usize, usize))>,
+    pub width: f32,
 }
 
 #[derive(Clone, Debug)]

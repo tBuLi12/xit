@@ -377,7 +377,6 @@ impl Component for FileForest {
         let width = self.width;
         self.visit_children(&mut |offset, child| {
             let point = offset + point;
-            child.draw(point, cursor.map(|cursor| cursor + offset), rt);
             if let Some(cursor) = cursor {
                 if cursor.x >= 0.0
                     && cursor.x <= width
@@ -396,6 +395,7 @@ impl Component for FileForest {
                     );
                 }
             }
+            child.draw(point, cursor.map(|cursor| cursor + offset), rt);
             false
         });
 

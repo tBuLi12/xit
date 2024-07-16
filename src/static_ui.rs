@@ -4,9 +4,11 @@ use std::{
     path::{self, PathBuf},
 };
 
+use editor::Editor;
 use rows::Rows;
 use text::Text;
 
+mod editor;
 mod file_forest;
 mod rows;
 mod text;
@@ -775,7 +777,7 @@ impl<C1: Component, C2: Component> Component for ResizableCols<C1, C2> {
 }
 
 pub struct App {
-    columns: ResizableCols<Button, FileForest>,
+    columns: ResizableCols<FileForest, Editor>,
     pending_renames: Option<Vec<PathBuf>>,
 }
 
@@ -802,21 +804,17 @@ impl Component for App {
 impl App {
     pub fn new(file_forest: FileForest) -> Self {
         Self {
-            columns: ResizableCols::new(
-                Button::new(100.0, 50.0, "Text 1".to_string()),
-                file_forest,
-                10.0,
-            ),
+            columns: ResizableCols::new(file_forest, Editor::new(), 10.0),
             pending_renames: None,
         }
     }
 
     pub fn add_files(&mut self, files: &[PathBuf], rt: &mut dyn Runtime) {
-        self.columns.col2.add_files(files, rt);
+        self.columns.col1.add_files(files, rt);
     }
 
     pub fn remove_files(&mut self, files: &[PathBuf], rt: &mut dyn Runtime) {
-        self.columns.col2.remove_files(files);
+        self.columns.col1.remove_files(files);
     }
 
     pub fn rename_from(&mut self, paths: Vec<PathBuf>) {
@@ -843,7 +841,7 @@ impl App {
         }
 
         for (old_path, new_path) in pending_renames.iter().zip(paths.iter()) {
-            self.columns.col2.rename_file(old_path, new_path, rt);
+            self.columns.col1.rename_file(old_path, new_path, rt);
         }
 
         self.pending_renames = None;
@@ -855,11 +853,11 @@ impl App {
         new_path: &path::Path,
         rt: &mut dyn Runtime,
     ) {
-        self.columns.col2.rename_file(old_path, new_path, rt);
+        self.columns.col1.rename_file(old_path, new_path, rt);
     }
 
     pub fn rescan_files(&mut self, rt: &mut dyn Runtime) {
-        self.columns.col2.rescan_files(rt);
+        self.columns.col1.rescan_files(rt);
     }
 
     // fn rerender_file_tree(&mut self, rt: &mut dyn Runtime) {
