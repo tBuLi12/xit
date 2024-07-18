@@ -1,169 +1,128 @@
-use crate::CachedGlyph;
+use crate::{CachedGlyph, SubpixelPosition};
 
-use super::{AxisAlignment, Color, Component, Point, Runtime, Size};
-
-#[derive(Clone, Debug)]
-pub struct CachedCluster {
-    pub glyphs: Vec<CachedGlyph>,
-    pub start: usize,
-    pub end: usize,
-}
-
-#[derive(Clone, Debug)]
-pub struct CachedLine {
-    pub line: Vec<CachedCluster>,
-    pub width: f32,
-}
+use super::{AxisAlignment, CachedLine, Color, Component, Point, Runtime, Size, TextProps};
 
 #[derive(Clone, Debug)]
 struct CachedTextState {
-    buffer: cosmic_text::Buffer,
     glyphs: Vec<CachedLine>,
     size: Size,
+    last_subpixel_position: Option<SubpixelPosition>,
 }
 
 impl CachedTextState {
-    fn new(rt: &mut dyn Runtime) -> Self {
-        let buffer = cosmic_text::Buffer::new(
-            rt.font_system(),
-            cosmic_text::Metrics {
-                font_size: 40.0,
-                line_height: 40.0,
-            },
-        );
-
+    fn new() -> Self {
         Self {
-            buffer,
             glyphs: vec![],
             size: Size {
                 width: 0.0,
                 height: 0.0,
             },
+            last_subpixel_position: None,
         }
     }
 
-    fn layout_text(&mut self, rt: &mut dyn Runtime) {
+    fn layout_text(
+        &mut self,
+        text: &str,
+        props: TextProps,
+        subpixel_position: SubpixelPosition,
+        rt: &mut dyn Runtime,
+    ) {
         self.glyphs.clear();
-        self.buffer.shape_until_scroll(rt.font_system(), false);
 
-        let mut line_count = 0;
-        let mut width: f32 = 0.0;
+        let mut line = CachedLine {
+            glyphs: vec![],
+            units: vec![],
+            width: 0.0,
+        };
 
-        for run in self.buffer.layout_runs() {
-            line_count += 1;
-            width = width.max(run.line_w);
+        rt.get_text(props)
+            .render_line(text, subpixel_position, &mut line);
 
-            let mut line = CachedLine {
-                line: vec![],
-                width: run.line_w,
-            };
+        let width = line.width;
 
-            for glyph in run.glyphs {
-                let physical_glyph = glyph.physical((0.0, 0.0), 1.0);
-                let Some(mut cached_glyph) = rt.get_glyph(physical_glyph.cache_key) else {
-                    continue;
-                };
-
-                cached_glyph.top += physical_glyph.y as f32 - run.line_y;
-                cached_glyph.left += physical_glyph.x as f32;
-
-                line.line.push((cached_glyph, (glyph.start, glyph.end)));
-            }
-            self.glyphs.push(line);
-        }
+        self.glyphs.push(line);
 
         self.size = Size {
             width,
-            height: 40.0 * line_count as f32,
+            height: 40.0,
         };
+        self.last_subpixel_position = Some(subpixel_position);
     }
-
-    fn set_bounds(&mut self, bounds: Size, rt: &mut dyn Runtime) {
-        self.buffer
-            .set_size(rt.font_system(), Some(bounds.width), Some(bounds.height));
-    }
-
-    fn set_text(&mut self, text: &str, rt: &mut dyn Runtime) {
-        self.buffer.set_text(
-            rt.font_system(),
-            text,
-            cosmic_text::Attrs::new(),
-            cosmic_text::Shaping::Advanced,
-        );
-    }
-}
-
-#[derive(Clone, Debug)]
-enum TextState {
-    New(String),
-    Cached(CachedTextState),
 }
 
 #[derive(Clone, Debug)]
 pub struct Text {
-    inner: TextState,
+    text: String,
+    cached: Option<CachedTextState>,
     h_alignment: AxisAlignment,
     bounds: Size,
     color: Color,
+    props: TextProps,
 }
 
 impl Text {
     pub fn new(value: String, color: Color, h_alignment: AxisAlignment) -> Self {
-        // let mut buffer = cosmic_text::Buffer::new_empty(cosmic_text::Metrics {
-        //     font_size: 40.0,
-        //     line_height: 40.0,
-        // });
-
         Self {
-            inner: TextState::New(value),
+            text: value,
+            cached: None,
             bounds: Size {
                 width: 0.0,
                 height: 0.0,
             },
             h_alignment,
             color,
+            props: TextProps {
+                font_size: 40.0,
+                font_id: 1,
+            },
         }
     }
 
     pub fn set_text(&mut self, new_text: &str, rt: &mut dyn Runtime) {
-        match &mut self.inner {
-            TextState::Cached(cached) => {
-                cached.set_text(new_text, rt);
-                cached.layout_text(rt);
-            }
-            TextState::New(text) => {
-                text.clear();
-                text.push_str(new_text);
-            }
+        self.text.clear();
+        self.text.push_str(new_text);
+        if let Some(cached) = &mut self.cached {
+            cached.last_subpixel_position = None;
         }
     }
 
-    fn get_text_state(&mut self, rt: &mut dyn Runtime) -> &mut CachedTextState {
-        let cached = match &mut self.inner {
-            TextState::Cached(_) => None,
-            TextState::New(text) => {
-                let mut cached = CachedTextState::new(rt);
-                cached.set_text(text, rt);
-                Some(cached)
-            }
-        };
+    // fn get_text_state(&mut self, rt: &mut dyn Runtime) -> &mut CachedTextState {
+    //     let cached = match &mut self.cached {
+    //         Some(_) => None,
+    //         None => {
+    //             let mut cached = CachedTextState::new();
+    //             cached.layout_text(&self.text, self.props, rt);
+    //             Some(cached)
+    //         }
+    //     };
 
-        if let Some(cached) = cached {
-            self.inner = TextState::Cached(cached);
-        }
+    //     if let Some(cached) = cached {
+    //         self.cached = Some(cached);
+    //     }
 
-        let TextState::Cached(cached) = &mut self.inner else {
-            unreachable!()
-        };
-        cached
-    }
+    //     let Some(cached) = &mut self.cached else {
+    //         unreachable!()
+    //     };
+    //     cached
+    // }
 }
 
 impl Component for Text {
     fn draw(&mut self, point: Point, cursor: Option<Point>, rt: &mut dyn Runtime) {
-        let TextState::Cached(cached) = &mut self.inner else {
-            panic!("Cannot draw text before layout");
+        let (x, y, subpixel_position) = SubpixelPosition::from_f32(point.x, point.y);
+
+        if self.cached.is_none() {
+            self.cached = Some(CachedTextState::new());
+        }
+
+        let Some(cached) = &mut self.cached else {
+            unreachable!()
         };
+
+        if cached.last_subpixel_position != Some(subpixel_position) {
+            cached.layout_text(&self.text, self.props, subpixel_position, rt);
+        }
 
         for line in &cached.glyphs {
             let end_x_offset = cached.size.width - line.width;
@@ -173,14 +132,15 @@ impl Component for Text {
                 AxisAlignment::End => end_x_offset,
             };
 
-            for (glyph, _) in &line.line {
+            for glyph in &line.glyphs {
                 if let Some(tex_position) = glyph.tex_position {
                     rt.draw_glyph(
-                        point.x + glyph.left + x_offset,
-                        point.y - glyph.top,
+                        x + glyph.left + x_offset,
+                        y - glyph.top + self.bounds.height,
                         glyph.size,
                         tex_position,
                         self.color,
+                        Color::black(),
                     );
                 }
             }
@@ -188,13 +148,14 @@ impl Component for Text {
     }
 
     fn set_bounds(&mut self, bounds: Size, rt: &mut dyn Runtime) {
-        let cached = self.get_text_state(rt);
-        cached.set_bounds(bounds, rt);
-        cached.layout_text(rt);
+        if let Some(cached) = &mut self.cached {
+            cached.last_subpixel_position = None;
+        }
+        self.bounds = bounds;
     }
 
     fn size(&self) -> Size {
-        let TextState::Cached(cached) = &self.inner else {
+        let Some(cached) = &self.cached else {
             panic!("Cannot get size before layout");
         };
 

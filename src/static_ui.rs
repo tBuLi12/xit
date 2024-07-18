@@ -6,6 +6,7 @@ use std::{
 
 use editor::Editor;
 use rows::Rows;
+use swash::shape::cluster::GlyphCluster;
 use text::Text;
 
 mod editor;
@@ -13,7 +14,7 @@ mod file_forest;
 mod rows;
 mod text;
 
-use crate::CachedGlyph;
+use crate::{CachedGlyph, SubpixelPosition};
 
 pub use file_forest::FileForest;
 
@@ -284,6 +285,38 @@ impl Color {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+pub struct TextProps {
+    pub font_size: f32,
+    pub font_id: u32,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct TextUnit {
+    pub glyph_start: usize,
+    pub glyph_end: usize,
+    pub byte_start: usize,
+    pub byte_end: usize,
+    pub advance: f32,
+}
+
+#[derive(Clone, Debug)]
+pub struct CachedLine {
+    pub glyphs: Vec<CachedGlyph>,
+    pub units: Vec<TextUnit>,
+    pub width: f32,
+}
+
+pub trait TextRenderer {
+    fn render_line(
+        &mut self,
+        text: &str,
+        subpixel_position: SubpixelPosition,
+        cached: &mut CachedLine,
+    );
+    fn x_height(&self) -> f32;
+}
+
 pub trait Runtime {
     // fn next_text_id(&mut self) -> PrimitiveID;
     // fn next_rect_id(&mut self) -> PrimitiveID;
@@ -298,8 +331,16 @@ pub trait Runtime {
         bg_color: Color,
         border_color: Color,
     );
-    fn draw_glyph(&mut self, x: f32, y: f32, size: [f32; 2], tex_coords: [f32; 2], color: Color);
-    fn get_glyph(&mut self, key: cosmic_text::CacheKey) -> Option<CachedGlyph>;
+    fn draw_glyph(
+        &mut self,
+        x: f32,
+        y: f32,
+        size: [f32; 2],
+        tex_coords: [f32; 2],
+        color: Color,
+        bg_color: Color,
+    );
+    fn get_text(&mut self, props: TextProps) -> Box<dyn TextRenderer + '_>;
 }
 
 pub trait Component {

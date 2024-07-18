@@ -45,6 +45,12 @@ mod signal;
 mod static_ui;
 // mod ui;
 
+struct Font {
+    data: Vec<u8>,
+    offset: u32,
+    key: swash::CacheKey,
+}
+
 struct Renderer {
     entry: ash::Entry,
     instance: ash::Instance,
@@ -73,9 +79,10 @@ struct Renderer {
     fragment_shader_module: vk::ShaderModule,
     pre_transform: vk::SurfaceTransformFlagsKHR,
     present_mode: vk::PresentModeKHR,
-    shaping_context: swash::shape::ShapeContext,
+    shape_context: swash::shape::ShapeContext,
     scale_context: swash::scale::ScaleContext,
     swash_image: swash::scale::image::Image,
+    fonts: HashMap<u32, Font>,
     atlas: Atlas,
     acquire_timer: Timer,
     uniform_timer: Timer,
@@ -126,7 +133,7 @@ struct Atlas {
     sampler: vk::Sampler,
     current_texture_layout: vk::ImageLayout,
     upload_buffer: Buffer,
-    glyph_cache: HashMap<swash::GlyphId, CachedGlyph>,
+    glyph_cache: HashMap<(SubpixelPosition, swash::GlyphId), CachedGlyph>,
     allocator: etagere::BucketedAtlasAllocator,
 }
 
@@ -279,7 +286,7 @@ fn create_atlas(
 
         let image_create_info = vk::ImageCreateInfo::default()
             .image_type(vk::ImageType::TYPE_2D)
-            .format(vk::Format::R8_UNORM)
+            .format(vk::Format::R8G8B8A8_UNORM)
             .usage(vk::ImageUsageFlags::TRANSFER_DST | vk::ImageUsageFlags::SAMPLED)
             .tiling(vk::ImageTiling::OPTIMAL)
             .samples(vk::SampleCountFlags::TYPE_1)
@@ -315,7 +322,7 @@ fn create_atlas(
         let texture_view_create_info = vk::ImageViewCreateInfo::default()
             .image(texture)
             .view_type(vk::ImageViewType::TYPE_2D)
-            .format(vk::Format::R8_UNORM)
+            .format(vk::Format::R8G8B8A8_UNORM)
             .subresource_range(
                 vk::ImageSubresourceRange::default()
                     .aspect_mask(vk::ImageAspectFlags::COLOR)
@@ -1002,7 +1009,29 @@ impl Renderer {
                     viewports,
                     scissors,
                 },
+                scale_context: swash::scale::ScaleContext::new(),
+                shape_context: swash::shape::ShapeContext::new(),
+                swash_image: swash::scale::image::Image::new(),
+                fonts: {
+                    let mut fonts = HashMap::new();
 
+                    let data = include_bytes!("../FIRACODE-MEDIUM.TTF").to_vec();
+
+                    let font = swash::FontRef::from_index(&data, 0).unwrap();
+                    let (offset, key) = (font.offset, font.key);
+                    // Return our struct with the original file data and copies of the
+                    // offset and key from the font reference
+
+                    fonts.insert(0, Font { data, offset, key });
+
+                    let data = include_bytes!("../ARIAL.TTF").to_vec();
+
+                    let font = swash::FontRef::from_index(&data, 0).unwrap();
+                    let (offset, key) = (font.offset, font.key);
+                    fonts.insert(1, Font { data, offset, key });
+
+                    fonts
+                },
                 atlas,
                 acquire_timer: Timer::new("acquire_timer"),
                 instance_timer: Timer::new("instance"),
@@ -1450,100 +1479,260 @@ impl static_ui::Runtime for Renderer {
         });
     }
 
-    fn draw_glyph(&mut self, x: f32, y: f32, size: [f32; 2], tex_coords: [f32; 2], color: Color) {
+    fn draw_glyph(
+        &mut self,
+        x: f32,
+        y: f32,
+        size: [f32; 2],
+        tex_coords: [f32; 2],
+        color: Color,
+        bg_color: Color,
+    ) {
         self.rectangles.push(RenderedRectangle {
             pos: [x, y],
-            size: size,
+            size,
             tex_coords,
             tex_blend: 1.0,
-            bg_color: color,
-            border_color: Color::clear(),
+            bg_color,
+            border_color: color,
             border_width: 0.0,
             corner_radius: 0.0,
         })
     }
 
-    fn get_glyph(&mut self, id: swash::GlyphId) -> Option<CachedGlyph> {
-        if let Some(glyph) = self.atlas.glyph_cache.get(&id) {
-            return Some(*glyph);
-        }
-
-        use swash::zeno::{Format, Vector};
-        // Build the scaler
-        let mut scaler = self.scale_context.builder(*font).hint(true).build();
-
-        // Compute the fractional offset-- you'll likely want to quantize this
-        // in a real renderer
-        let offset = Vector::new(x.fract(), y.fract());
-        // Select our source order
-        if !swash::scale::Render::new(&[swash::scale::Source::Outline])
-            // Select a subpixel format
-            .format(Format::Subpixel)
-            // Apply the fractional offset
-            .offset(offset)
-            // Render the image
-            .render_into(&mut scaler, id, &mut self.swash_image)
-        {
-            println!("No glyph");
-            return None;
-        }
-
-        let placement = self.swash_image.placement;
-
-        let mut glyph = CachedGlyph {
-            left: placement.left as f32,
-            top: placement.top as f32,
-            size: [placement.width as f32, placement.height as f32],
-            tex_position: None,
+    fn get_text(&mut self, props: static_ui::TextProps) -> Box<dyn static_ui::TextRenderer + '_> {
+        let owned_font = self.fonts.get(&props.font_id).unwrap();
+        let font = swash::FontRef {
+            data: &owned_font.data,
+            offset: owned_font.offset,
+            key: owned_font.key,
         };
 
-        if self.swash_image.data.len() == 0 {
-            return Some(glyph);
-        }
+        let shaper = self.shape_context.builder(font).build();
+        let coords = shaper.normalized_coords();
 
-        let upload_buffer = self.atlas.upload_buffer;
-        if (upload_buffer.size as usize) < self.swash_image.data.len() {
-            panic!(
-                "Upload buffer too small {} < {}",
-                upload_buffer.size,
-                self.swash_image.data.len()
-            );
-        }
+        let x_height = font.metrics(coords).x_height;
 
-        upload_buffer.copy_from_slice(&self.device, &self.swash_image.data);
-
-        println!("allocating {}x{}", placement.width, placement.height);
-
-        let tex_glyph_rect = self
-            .atlas
-            .allocator
-            .allocate(etagere::size2(
-                placement.width as i32,
-                placement.height as i32,
-            ))
-            .unwrap();
-
-        self.atlas.upload(
-            &self.device,
-            self.command_pool,
-            self.present_queue,
-            [
-                tex_glyph_rect.rectangle.min.x as u32,
-                tex_glyph_rect.rectangle.min.y as u32,
-            ],
-            [placement.width, placement.height],
-        );
-
-        glyph.tex_position = Some([
-            tex_glyph_rect.rectangle.min.x as f32,
-            tex_glyph_rect.rectangle.min.y as f32,
-        ]);
-
-        self.atlas.glyph_cache.insert(id, glyph);
-
-        Some(glyph)
+        Box::new(TextRenderer {
+            font,
+            x_height,
+            size: props.font_size,
+            image: &mut self.swash_image,
+            atlas: &mut self.atlas,
+            scale_context: &mut self.scale_context,
+            shape_context: &mut self.shape_context,
+            device: &self.device,
+            command_pool: &self.command_pool,
+            present_queue: &self.present_queue,
+        })
     }
 }
+
+struct TextRenderer<'rt> {
+    font: swash::FontRef<'rt>,
+    x_height: f32,
+    size: f32,
+    image: &'rt mut swash::scale::image::Image,
+    atlas: &'rt mut Atlas,
+    scale_context: &'rt mut swash::scale::ScaleContext,
+    shape_context: &'rt mut swash::shape::ShapeContext,
+    device: &'rt ash::Device,
+    command_pool: &'rt vk::CommandPool,
+    present_queue: &'rt vk::Queue,
+}
+
+const TEXT_SUBPIXELS: u16 = 3;
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub struct SubpixelPosition {
+    pub x: u16,
+    pub y: u16,
+}
+
+impl SubpixelPosition {
+    pub fn from_f32(x: f32, y: f32) -> (f32, f32, Self) {
+        let x_rounded = (x * TEXT_SUBPIXELS as f32).round() as u16;
+        let y_rounded = (y * TEXT_SUBPIXELS as f32).round() as u16;
+        (
+            (x_rounded / TEXT_SUBPIXELS) as f32,
+            (y_rounded / TEXT_SUBPIXELS) as f32,
+            Self {
+                x: x_rounded % TEXT_SUBPIXELS,
+                y: y_rounded % TEXT_SUBPIXELS,
+            },
+        )
+    }
+
+    pub fn as_f32(&self) -> (f32, f32) {
+        (
+            self.x as f32 / TEXT_SUBPIXELS as f32,
+            self.y as f32 / TEXT_SUBPIXELS as f32,
+        )
+    }
+}
+
+impl std::ops::Add<SubpixelPosition> for SubpixelPosition {
+    type Output = SubpixelPosition;
+    fn add(self, rhs: SubpixelPosition) -> Self::Output {
+        Self {
+            x: self.x + rhs.x,
+            y: self.y + rhs.y,
+        }
+    }
+}
+
+impl<'rt> static_ui::TextRenderer for TextRenderer<'rt> {
+    fn render_line(
+        &mut self,
+        text: &str,
+        subpixel_position: SubpixelPosition,
+        cached: &mut static_ui::CachedLine,
+    ) {
+        let (x, y) = subpixel_position.as_f32();
+
+        let mut shaper = self
+            .shape_context
+            .builder(self.font)
+            .size(self.size)
+            .build();
+
+        let mut scaler = self
+            .scale_context
+            .builder(self.font)
+            .size(self.size)
+            .hint(true)
+            .build();
+
+        shaper.add_str(text);
+
+        cached.glyphs.clear();
+        cached.units.clear();
+
+        let mut advance: f32 = 0.0;
+        let mut glyph_idx = 0;
+
+        shaper.shape_with(|cluster| {
+            let start = glyph_idx;
+            for glyph in cluster.glyphs {
+                glyph_idx += 1;
+                let (mut cached_glyph, x, y) = 'glyph: {
+                    let (x, y, glyph_subpixels) =
+                        SubpixelPosition::from_f32(glyph.x + advance + x, glyph.y + y);
+
+                    advance += glyph.advance;
+
+                    if let Some(cached_glyph) =
+                        self.atlas.glyph_cache.get(&(glyph_subpixels, glyph.id))
+                    {
+                        break 'glyph (*cached_glyph, x, y);
+                    }
+
+                    use swash::zeno::{Format, Vector};
+                    let offset = {
+                        let (x, y) = glyph_subpixels.as_f32();
+                        Vector::new(x, y)
+                    };
+                    self.image.clear();
+                    if !swash::scale::Render::new(&[swash::scale::Source::Outline])
+                        .format(Format::Subpixel)
+                        .offset(offset)
+                        .render_into(&mut scaler, glyph.id, &mut self.image)
+                    {
+                        panic!("No glyph");
+                    }
+
+                    // eprintln!("{:?}", &self.image.data);
+
+                    let placement = self.image.placement;
+
+                    let mut cached_glyph = CachedGlyph {
+                        left: placement.left as f32,
+                        top: placement.top as f32,
+                        size: [placement.width as f32, placement.height as f32],
+                        tex_position: None,
+                    };
+
+                    if self.image.data.len() == 0 {
+                        break 'glyph (cached_glyph, x, y);
+                    }
+
+                    let upload_buffer = self.atlas.upload_buffer;
+                    if (upload_buffer.size as usize) < self.image.data.len() {
+                        panic!(
+                            "Upload buffer too small {} < {}",
+                            upload_buffer.size,
+                            self.image.data.len()
+                        );
+                    }
+
+                    upload_buffer.copy_from_slice(&self.device, &self.image.data);
+
+                    println!("allocating {}x{}", placement.width, placement.height);
+
+                    let tex_glyph_rect = self
+                        .atlas
+                        .allocator
+                        .allocate(etagere::size2(
+                            placement.width as i32,
+                            placement.height as i32,
+                        ))
+                        .unwrap();
+
+                    self.atlas.upload(
+                        &self.device,
+                        *self.command_pool,
+                        *self.present_queue,
+                        [
+                            tex_glyph_rect.rectangle.min.x as u32,
+                            tex_glyph_rect.rectangle.min.y as u32,
+                        ],
+                        [placement.width, placement.height],
+                    );
+
+                    cached_glyph.tex_position = Some([
+                        tex_glyph_rect.rectangle.min.x as f32,
+                        tex_glyph_rect.rectangle.min.y as f32,
+                    ]);
+
+                    self.atlas
+                        .glyph_cache
+                        .insert((glyph_subpixels, glyph.id), cached_glyph);
+
+                    (cached_glyph, x, y)
+                };
+                cached_glyph.top += y;
+                cached_glyph.left += x;
+                cached.glyphs.push(cached_glyph);
+            }
+
+            cached.units.push(static_ui::TextUnit {
+                glyph_start: start,
+                glyph_end: glyph_idx,
+                byte_start: cluster.source.start as usize,
+                byte_end: cluster.source.end as usize,
+                advance,
+            })
+        });
+    }
+
+    fn x_height(&self) -> f32 {
+        self.x_height
+    }
+}
+
+// impl<'rt> TextRenderer<'rt> {
+//     fn get_glyph(&mut self, id: swash::GlyphId) -> Option<CachedGlyph> {
+//         if let Some(glyph) = self.atlas.glyph_cache.get(&id) {
+//             return Some(*glyph);
+//         }
+
+//         // Build the scaler
+//         let mut scaler = self.scale_context.builder(self.font).hint(true).build();
+
+//         // Compute the fractional offset-- you'll likely want to quantize this
+//         // in a real renderer
+//     }
+// }
 
 struct Timer {
     count: u32,

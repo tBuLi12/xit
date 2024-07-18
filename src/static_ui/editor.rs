@@ -1,82 +1,57 @@
-use cosmic_text::{Attrs, AttrsList};
+use crate::SubpixelPosition;
 
-use super::{text::CachedLine, Color, Component, Point, Runtime, Size};
+use super::{CachedLine, Color, Component, Point, Runtime, Size};
 
 struct Line {
-    buffer: cosmic_text::BufferLine,
-    glyphs: CachedLine,
-    dirty: bool,
+    text: String,
+    cached: CachedLine,
+    last_subpixel_position: Option<SubpixelPosition>,
 }
 
 impl Line {
     fn new(text: String) -> Self {
         Self {
-            buffer: cosmic_text::BufferLine::new(
-                text,
-                cosmic_text::LineEnding::None,
-                AttrsList::new(Attrs::new()),
-                cosmic_text::Shaping::Advanced,
-            ),
-            glyphs: CachedLine {
-                line: vec![],
+            text,
+            cached: CachedLine {
+                glyphs: vec![],
+                units: vec![],
                 width: 0.0,
             },
-            dirty: true,
+            last_subpixel_position: None,
         }
     }
 
-    fn layout_text(&mut self, rt: &mut dyn Runtime) {
-        self.glyphs.line.clear();
+    fn layout_text(&mut self, rt: &mut dyn Runtime, subpixel_position: SubpixelPosition) {
+        rt.get_text(super::TextProps {
+            font_size: 26.0,
+            font_id: 0,
+        })
+        .render_line(&self.text, subpixel_position, &mut self.cached);
 
-        let shape = self.buffer.shape(rt.font_system(), 4);
-        let laid_out_line = shape
-            .layout(40.0, None, cosmic_text::Wrap::None, None, None)
-            .pop()
-            .unwrap();
-
-        for glyph in laid_out_line.glyphs {
-            let physical_glyph = glyph.physical((0.0, 0.0), 1.0);
-            let Some(mut cached_glyph) = rt.get_glyph(physical_glyph.cache_key) else {
-                continue;
-            };
-
-            cached_glyph.top += physical_glyph.y as f32;
-            cached_glyph.left += physical_glyph.x as f32;
-
-            self.glyphs
-                .line
-                .push((cached_glyph, (glyph.start, glyph.end)));
-        }
-
-        self.glyphs.width = laid_out_line.w;
-        self.dirty = false;
+        self.last_subpixel_position = Some(subpixel_position);
     }
 
-    fn set_text(&mut self, text: String, rt: &mut dyn Runtime) {
-        self.buffer.set_text(
-            text,
-            cosmic_text::LineEnding::None,
-            AttrsList::new(Attrs::new()),
-        );
-        self.layout_text(rt);
+    fn invalidate(&mut self) {
+        self.last_subpixel_position = None;
     }
 
     fn draw(&mut self, point: Point, _: Option<Point>, rt: &mut dyn Runtime) {
-        if self.dirty {
-            self.layout_text(rt);
+        let (x, y, subpixel_position) = SubpixelPosition::from_f32(point.x, point.y);
+
+        if self.last_subpixel_position != Some(subpixel_position) {
+            self.layout_text(rt, subpixel_position);
         }
 
-        for cluster in &self.glyphs.line {
-            for glyph in &cluster.glyphs {
-                if let Some(tex_position) = glyph.tex_position {
-                    rt.draw_glyph(
-                        point.x + glyph.left,
-                        point.y - glyph.top - 20.0,
-                        glyph.size,
-                        tex_position,
-                        Color::black().red(1.0),
-                    );
-                }
+        for glyph in &self.cached.glyphs {
+            if let Some(tex_position) = glyph.tex_position {
+                rt.draw_glyph(
+                    x + glyph.left,
+                    y - glyph.top - 20.0,
+                    glyph.size,
+                    tex_position,
+                    Color::black().red(1.0),
+                    Color::black(),
+                );
             }
         }
     }
@@ -102,8 +77,8 @@ impl Component for Editor {
         let offset = if self.cursor.byte == 0 {
             0.0
         } else {
-            let glyph = self.lines[self.cursor.line].glyphs.line[self.cursor.character].glyphs;
-            glyph.left + glyph.size[0]
+            let advance = self.lines[self.cursor.line].cached.units[self.cursor.unit].advance;
+            advance
         };
 
         rt.draw_rect(
@@ -149,16 +124,13 @@ impl Component for Editor {
         self.size = bounds;
     }
 
-    // fn key_pressed(&mut self, key: &str, rt: &mut dyn Runtime) {
-    //     let Some(cursor) = self.cursor else {
-    //         return;
-    //     };
-    //     let mut text = self.line.text().to_string();
-    //     text.insert_str(cursor, &key);
-    //     self.cursor = Some(cursor + key.len());
-    //     self.set_text(text, rt);
-    //     self.layout_text(rt);
-    // }
+    fn key_pressed(&mut self, key: &str, rt: &mut dyn Runtime) {
+        let line = &mut self.lines[self.cursor.line];
+        line.text.insert_str(self.cursor.byte, &key);
+        line.invalidate();
+        self.cursor.byte += key.len();
+        // self.cursor = Some(cursor + key.len());
+    }
 
     fn size(&self) -> Size {
         self.size
@@ -177,13 +149,13 @@ impl Editor {
             lines: vec![
                 Line::new("Hello".to_string()),
                 Line::new("World".to_string()),
-                Line::new("Worldg".to_string()),
+                Line::new("World g".to_string()),
                 Line::new("World".to_string()),
             ],
             size: Size::ZERO,
             cursor: Cursor {
                 line: 2,
-                character: 2,
+                unit: 2,
                 byte: 2,
             },
         }
@@ -192,6 +164,6 @@ impl Editor {
 
 struct Cursor {
     line: usize,
-    character: usize,
+    unit: usize,
     byte: usize,
 }
