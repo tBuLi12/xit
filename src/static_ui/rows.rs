@@ -68,18 +68,6 @@ impl<C: Component> Component for Rows<C> {
         }
     }
 
-    fn mouse_move(&mut self, dx: f32, dy: f32, rt: &mut dyn Runtime) {
-        for row in &mut self.rows {
-            row.mouse_move(dx, dy, rt);
-        }
-    }
-
-    fn key_pressed(&mut self, key: &str, rt: &mut dyn Runtime) {
-        for row in &mut self.rows {
-            row.key_pressed(key, rt);
-        }
-    }
-
     fn size(&self) -> Size {
         Size {
             width: self

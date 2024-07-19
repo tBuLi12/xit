@@ -133,7 +133,7 @@ struct Atlas {
     sampler: vk::Sampler,
     current_texture_layout: vk::ImageLayout,
     upload_buffer: Buffer,
-    glyph_cache: HashMap<(SubpixelPosition, swash::GlyphId), CachedGlyph>,
+    glyph_cache: HashMap<(u32, SubpixelPosition, swash::GlyphId), CachedGlyph>,
     allocator: etagere::BucketedAtlasAllocator,
 }
 
@@ -278,7 +278,7 @@ fn create_atlas(
     unsafe {
         let upload_buffer = create_buffer(
             device,
-            4096,
+            4096 * 4,
             vk::BufferUsageFlags::TRANSFER_SRC,
             vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
             device_memory_properties,
@@ -503,6 +503,7 @@ impl Renderer {
             let device_extension_names_raw = [ash::khr::swapchain::NAME.as_ptr()];
             let features = vk::PhysicalDeviceFeatures {
                 shader_clip_distance: 1,
+                dual_src_blend: 1,
                 ..Default::default()
             };
             let priorities = [1.0];
@@ -853,8 +854,8 @@ impl Renderer {
 
             let color_blend_attachment_states = [vk::PipelineColorBlendAttachmentState {
                 blend_enable: vk::TRUE,
-                src_color_blend_factor: vk::BlendFactor::SRC_ALPHA,
-                dst_color_blend_factor: vk::BlendFactor::ONE_MINUS_SRC_ALPHA,
+                src_color_blend_factor: vk::BlendFactor::SRC1_COLOR,
+                dst_color_blend_factor: vk::BlendFactor::ONE_MINUS_SRC1_COLOR,
                 color_blend_op: vk::BlendOp::ADD,
                 src_alpha_blend_factor: vk::BlendFactor::ONE,
                 dst_alpha_blend_factor: vk::BlendFactor::ZERO,
@@ -1015,7 +1016,7 @@ impl Renderer {
                 fonts: {
                     let mut fonts = HashMap::new();
 
-                    let data = include_bytes!("../FIRACODE-MEDIUM.TTF").to_vec();
+                    let data = include_bytes!("../FIRACODE-REGULAR.TTF").to_vec();
 
                     let font = swash::FontRef::from_index(&data, 0).unwrap();
                     let (offset, key) = (font.offset, font.key);
@@ -1515,6 +1516,7 @@ impl static_ui::Runtime for Renderer {
 
         Box::new(TextRenderer {
             font,
+            font_id: props.font_id,
             x_height,
             size: props.font_size,
             image: &mut self.swash_image,
@@ -1530,6 +1532,7 @@ impl static_ui::Runtime for Renderer {
 
 struct TextRenderer<'rt> {
     font: swash::FontRef<'rt>,
+    font_id: u32,
     x_height: f32,
     size: f32,
     image: &'rt mut swash::scale::image::Image,
@@ -1571,16 +1574,6 @@ impl SubpixelPosition {
     }
 }
 
-impl std::ops::Add<SubpixelPosition> for SubpixelPosition {
-    type Output = SubpixelPosition;
-    fn add(self, rhs: SubpixelPosition) -> Self::Output {
-        Self {
-            x: self.x + rhs.x,
-            y: self.y + rhs.y,
-        }
-    }
-}
-
 impl<'rt> static_ui::TextRenderer for TextRenderer<'rt> {
     fn render_line(
         &mut self,
@@ -1612,6 +1605,8 @@ impl<'rt> static_ui::TextRenderer for TextRenderer<'rt> {
         let mut glyph_idx = 0;
 
         shaper.shape_with(|cluster| {
+            dbg!(cluster.glyphs.len());
+            dbg!(cluster.is_ligature());
             let start = glyph_idx;
             for glyph in cluster.glyphs {
                 glyph_idx += 1;
@@ -1622,7 +1617,9 @@ impl<'rt> static_ui::TextRenderer for TextRenderer<'rt> {
                     advance += glyph.advance;
 
                     if let Some(cached_glyph) =
-                        self.atlas.glyph_cache.get(&(glyph_subpixels, glyph.id))
+                        self.atlas
+                            .glyph_cache
+                            .get(&(self.font_id, glyph_subpixels, glyph.id))
                     {
                         break 'glyph (*cached_glyph, x, y);
                     }
@@ -1696,7 +1693,7 @@ impl<'rt> static_ui::TextRenderer for TextRenderer<'rt> {
 
                     self.atlas
                         .glyph_cache
-                        .insert((glyph_subpixels, glyph.id), cached_glyph);
+                        .insert((self.font_id, glyph_subpixels, glyph.id), cached_glyph);
 
                     (cached_glyph, x, y)
                 };
@@ -1820,17 +1817,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
                 match event {
                     Event::WindowEvent {
-                        event:
-                            WindowEvent::CloseRequested
-                            | WindowEvent::KeyboardInput {
-                                event:
-                                    KeyEvent {
-                                        state: ElementState::Pressed,
-                                        logical_key: Key::Named(NamedKey::Escape),
-                                        ..
-                                    },
-                                ..
-                            },
+                        event: WindowEvent::CloseRequested,
                         ..
                     } => {
                         elwp.exit();
@@ -1925,10 +1912,12 @@ fn main() -> Result<(), Box<dyn Error>> {
                         ..
                     } => {
                         eprintln!("{:?}", event);
-                        if let Some(text) = event.text {
-                            eprintln!("textn {}", &text);
-                            app_ui.key_pressed(&text, &mut renderer);
-                            window.request_redraw();
+                        match event.state {
+                            ElementState::Pressed => {
+                                app_ui.key_pressed(&event.logical_key, &mut renderer);
+                                window.request_redraw();
+                            }
+                            _ => {}
                         }
                     }
                     Event::UserEvent(event) => {

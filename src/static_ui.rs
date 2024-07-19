@@ -8,6 +8,7 @@ use editor::Editor;
 use rows::Rows;
 use swash::shape::cluster::GlyphCluster;
 use text::Text;
+use winit::keyboard;
 
 mod editor;
 mod file_forest;
@@ -381,7 +382,7 @@ pub trait Component {
         });
     }
 
-    fn key_pressed(&mut self, key: &str, rt: &mut dyn Runtime) {
+    fn key_pressed(&mut self, key: &keyboard::Key, rt: &mut dyn Runtime) {
         self.handle_key_pressed(key, rt);
         self.visit_children(&mut |_, child| {
             child.key_pressed(key, rt);
@@ -407,7 +408,7 @@ pub trait Component {
     fn handle_mouse_move(&mut self, dx: f32, dy: f32, rt: &mut dyn Runtime) {}
 
     #[allow(unused_variables)]
-    fn handle_key_pressed(&mut self, key: &str, rt: &mut dyn Runtime) {}
+    fn handle_key_pressed(&mut self, key: &keyboard::Key, rt: &mut dyn Runtime) {}
 
     #[allow(unused_variables)]
     fn handle_scroll(&mut self, dx: f32, dy: f32, rt: &mut dyn Runtime) {}
@@ -844,7 +845,7 @@ impl Component for App {
 impl App {
     pub fn new(file_forest: FileForest) -> Self {
         Self {
-            columns: ResizableCols::new(file_forest, Editor::new(), 10.0),
+            columns: ResizableCols::new(file_forest, Editor::new("Cargo.toml"), 10.0),
             pending_renames: None,
         }
     }

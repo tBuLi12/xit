@@ -1879,6 +1879,7 @@ dependencies = [
  "etagere",
  "notify",
  "swash",
+ "unicode-segmentation",
  "winit",
 ]
 
