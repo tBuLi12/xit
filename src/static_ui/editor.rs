@@ -132,7 +132,7 @@ impl Component for Editor {
     //     true
     // }
 
-    fn set_bounds(&mut self, bounds: Size) {
+    fn set_bounds(&mut self, bounds: Size, rt: &mut dyn Runtime) {
         self.size = bounds;
     }
 

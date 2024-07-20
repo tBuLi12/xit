@@ -27,14 +27,17 @@ impl<C: Component> Component for Rows<C> {
         }
     }
 
-    fn set_bounds(&mut self, bounds: Size) {
+    fn set_bounds(&mut self, bounds: Size, rt: &mut dyn Runtime) {
         let mut height_remaining = bounds.height;
 
         for row in &mut self.rows {
-            row.set_bounds(Size {
-                width: bounds.width,
-                height: height_remaining,
-            });
+            row.set_bounds(
+                Size {
+                    width: bounds.width,
+                    height: height_remaining,
+                },
+                rt,
+            );
             height_remaining -= row.size().height;
         }
     }
@@ -65,16 +68,19 @@ impl<C: Component> Columns<C> {
         self.columns = columns;
     }
 
-    pub fn push(&mut self, mut column: C) {
-        column.set_bounds(Size {
-            width: self.bounds.width
-                - self
-                    .columns
-                    .iter()
-                    .map(|column| column.size().width)
-                    .sum::<f32>(),
-            height: self.bounds.height,
-        });
+    pub fn push(&mut self, mut column: C, rt: &mut dyn Runtime) {
+        column.set_bounds(
+            Size {
+                width: self.bounds.width
+                    - self
+                        .columns
+                        .iter()
+                        .map(|column| column.size().width)
+                        .sum::<f32>(),
+                height: self.bounds.height,
+            },
+            rt,
+        );
         self.columns.push(column);
     }
 }
@@ -92,15 +98,18 @@ impl<C: Component> Component for Columns<C> {
         }
     }
 
-    fn set_bounds(&mut self, bounds: Size) {
+    fn set_bounds(&mut self, bounds: Size, rt: &mut dyn Runtime) {
         self.bounds = bounds;
         let mut width_remaining = bounds.width;
 
         for row in &mut self.columns {
-            row.set_bounds(Size {
-                height: bounds.height,
-                width: width_remaining,
-            });
+            row.set_bounds(
+                Size {
+                    height: bounds.height,
+                    width: width_remaining,
+                },
+                rt,
+            );
             width_remaining -= row.size().width;
         }
     }

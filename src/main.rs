@@ -1019,12 +1019,10 @@ impl Renderer {
                 fonts: {
                     let mut fonts = HashMap::new();
 
-                    let data = include_bytes!("../FIRACODE-REGULAR.TTF").to_vec();
+                    let data = include_bytes!("../FIRACODE-MEDIUM.TTF").to_vec();
 
                     let font = swash::FontRef::from_index(&data, 0).unwrap();
                     let (offset, key) = (font.offset, font.key);
-                    // Return our struct with the original file data and copies of the
-                    // offset and key from the font reference
 
                     fonts.insert(0, Font { data, offset, key });
 
@@ -1516,7 +1514,8 @@ impl static_ui::Runtime for Renderer {
         let shaper = self.shape_context.builder(font).build();
         let coords = shaper.normalized_coords();
 
-        let x_height = font.metrics(coords).x_height;
+        let metrics = font.metrics(coords);
+        let x_height = metrics.x_height * props.font_size / metrics.units_per_em as f32;
 
         Box::new(TextRenderer {
             font,
@@ -1803,14 +1802,17 @@ fn main() -> Result<(), Box<dyn Error>> {
             .unwrap();
         watcher.unwatch(&current_dir.join(".git")).unwrap();
 
-        let file_tree = static_ui::FileForest::from_path(&current_dir);
+        let file_tree = static_ui::FileForest::from_path(&current_dir, &mut renderer);
 
         let mut app_ui = static_ui::App::new(file_tree);
 
-        app_ui.set_bounds(static_ui::Size {
-            width: window.inner_size().width as f32,
-            height: window.inner_size().height as f32,
-        });
+        app_ui.set_bounds(
+            static_ui::Size {
+                width: window.inner_size().width as f32,
+                height: window.inner_size().height as f32,
+            },
+            &mut renderer,
+        );
 
         let mut timer = Timer::new("Process move event");
         let mut draw_timer = Timer::new("Draw");
@@ -1851,10 +1853,13 @@ fn main() -> Result<(), Box<dyn Error>> {
                         ..
                     } => {
                         renderer.recreate_swapchain(&window).unwrap();
-                        app_ui.set_bounds(static_ui::Size {
-                            width: window.inner_size().width as f32,
-                            height: window.inner_size().height as f32,
-                        });
+                        app_ui.set_bounds(
+                            static_ui::Size {
+                                width: window.inner_size().width as f32,
+                                height: window.inner_size().height as f32,
+                            },
+                            &mut renderer,
+                        );
                     }
                     Event::WindowEvent {
                         event: WindowEvent::CursorMoved { position, .. },
@@ -1977,7 +1982,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 while let Some(event) = renderer.app_event_queue.pop_front() {
                     match event {
                         AppEvent::OpenFile(path) => {
-                            app_ui.open_file(path);
+                            app_ui.open_file(path, &mut renderer);
                         }
                     }
                 }
