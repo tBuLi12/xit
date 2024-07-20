@@ -1,5 +1,6 @@
 use std::borrow::Cow;
 use std::collections::HashMap;
+use std::collections::VecDeque;
 use std::default::Default;
 use std::error::Error;
 use std::ffi;
@@ -22,6 +23,7 @@ use ash::vk::DescriptorType;
 use ash::vk::ShaderStageFlags;
 use notify::event;
 use notify::Watcher;
+use static_ui::AppEvent;
 use static_ui::Color;
 use static_ui::Component;
 
@@ -90,6 +92,7 @@ struct Renderer {
     record_and_submit_timer: Timer,
     wait_timer: Timer,
     present_timer: Timer,
+    app_event_queue: VecDeque<AppEvent>,
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -678,7 +681,7 @@ impl Renderer {
                 .map(|_| {
                     create_buffer(
                         &device,
-                        1024 * mem::size_of::<RenderedRectangle>() as u64,
+                        4096 * mem::size_of::<RenderedRectangle>() as u64,
                         vk::BufferUsageFlags::VERTEX_BUFFER | vk::BufferUsageFlags::TRANSFER_DST,
                         vk::MemoryPropertyFlags::HOST_VISIBLE
                             | vk::MemoryPropertyFlags::HOST_COHERENT,
@@ -1040,6 +1043,7 @@ impl Renderer {
                 record_and_submit_timer: Timer::new("record_and_submit"),
                 uniform_timer: Timer::new("uniform"),
                 wait_timer: Timer::new("wait"),
+                app_event_queue: VecDeque::new(),
             })
         }
     }
@@ -1528,6 +1532,10 @@ impl static_ui::Runtime for Renderer {
             present_queue: &self.present_queue,
         })
     }
+
+    fn schedule_event(&mut self, event: AppEvent) {
+        self.app_event_queue.push_back(event);
+    }
 }
 
 struct TextRenderer<'rt> {
@@ -1605,8 +1613,6 @@ impl<'rt> static_ui::TextRenderer for TextRenderer<'rt> {
         let mut glyph_idx = 0;
 
         shaper.shape_with(|cluster| {
-            dbg!(cluster.glyphs.len());
-            dbg!(cluster.is_ligature());
             let start = glyph_idx;
             for glyph in cluster.glyphs {
                 glyph_idx += 1;
@@ -1710,6 +1716,8 @@ impl<'rt> static_ui::TextRenderer for TextRenderer<'rt> {
                 advance,
             })
         });
+
+        cached.width = advance;
     }
 
     fn x_height(&self) -> f32 {
@@ -1799,13 +1807,10 @@ fn main() -> Result<(), Box<dyn Error>> {
 
         let mut app_ui = static_ui::App::new(file_tree);
 
-        app_ui.set_bounds(
-            static_ui::Size {
-                width: window.inner_size().width as f32,
-                height: window.inner_size().height as f32,
-            },
-            &mut renderer,
-        );
+        app_ui.set_bounds(static_ui::Size {
+            width: window.inner_size().width as f32,
+            height: window.inner_size().height as f32,
+        });
 
         let mut timer = Timer::new("Process move event");
         let mut draw_timer = Timer::new("Draw");
@@ -1846,13 +1851,10 @@ fn main() -> Result<(), Box<dyn Error>> {
                         ..
                     } => {
                         renderer.recreate_swapchain(&window).unwrap();
-                        app_ui.set_bounds(
-                            static_ui::Size {
-                                width: window.inner_size().width as f32,
-                                height: window.inner_size().height as f32,
-                            },
-                            &mut renderer,
-                        );
+                        app_ui.set_bounds(static_ui::Size {
+                            width: window.inner_size().width as f32,
+                            height: window.inner_size().height as f32,
+                        });
                     }
                     Event::WindowEvent {
                         event: WindowEvent::CursorMoved { position, .. },
@@ -1970,6 +1972,14 @@ fn main() -> Result<(), Box<dyn Error>> {
                         }
                     }
                     _ => (),
+                }
+
+                while let Some(event) = renderer.app_event_queue.pop_front() {
+                    match event {
+                        AppEvent::OpenFile(path) => {
+                            app_ui.open_file(path);
+                        }
+                    }
                 }
             })
             .unwrap();

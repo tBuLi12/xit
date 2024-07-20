@@ -4,7 +4,7 @@ use std::{
     path::{self, PathBuf},
 };
 
-use super::{text::Text, AxisAlignment, Color, Component, Point, Runtime, Size};
+use super::{text::Text, AppEvent, AxisAlignment, Color, Component, Point, Runtime, Size, Visitor};
 
 pub struct FileForest {
     file_trees: Vec<FileTree>,
@@ -51,12 +51,17 @@ impl FileForest {
             let name = entry.file_name();
 
             if name != ".git" {
+                let mut text = Text::new(
+                    name.to_string_lossy().to_string(),
+                    Color::black().red(1.0),
+                    AxisAlignment::Start,
+                );
+                text.set_bounds(Size {
+                    width: 0.0,
+                    height: 50.0,
+                });
                 roots.push(FileTree {
-                    text: Text::new(
-                        name.to_string_lossy().to_string(),
-                        Color::black().red(1.0),
-                        AxisAlignment::Start,
-                    ),
+                    text,
                     name,
                     children: if path.is_dir() {
                         Children::Collapsed(Self::from_path_inner(path, depth + 1).file_trees)
@@ -99,13 +104,10 @@ impl FileForest {
 
             let name_string = name.to_string_lossy().to_string();
             let mut text = Text::new(name_string, Color::black().red(1.0), AxisAlignment::Start);
-            text.set_bounds(
-                Size {
-                    width,
-                    height: 50.0,
-                },
-                rt,
-            );
+            text.set_bounds(Size {
+                width,
+                height: 50.0,
+            });
 
             let mut new_tree = FileTree {
                 text,
@@ -255,13 +257,10 @@ impl FileForest {
                     Color::black().red(1.0),
                     AxisAlignment::Start,
                 );
-                text.set_bounds(
-                    Size {
-                        width,
-                        height: 50.0,
-                    },
-                    rt,
-                );
+                text.set_bounds(Size {
+                    width,
+                    height: 50.0,
+                });
                 trees.insert(
                     start,
                     FileTree {
@@ -329,7 +328,6 @@ impl FileForest {
                 start += parent_idx;
                 i += 1;
                 if i == components.len() {
-                    dbg!((start, i));
                     return Some((start, i, trees));
                 }
 
@@ -373,31 +371,31 @@ impl FileForest {
 }
 
 impl Component for FileForest {
-    fn draw(&mut self, point: Point, cursor: Option<Point>, rt: &mut dyn Runtime) {
-        let width = self.width;
-        self.visit_children(&mut |offset, child| {
-            let point = offset + point;
-            if let Some(cursor) = cursor {
-                if cursor.x >= 0.0
-                    && cursor.x <= width
-                    && cursor.y - point.y >= 0.0
-                    && cursor.y - point.y <= 50.0
-                {
-                    rt.draw_rect(
-                        point.x,
-                        point.y,
-                        width,
-                        50.0,
-                        0.0,
-                        0.0,
-                        Color::black().red(0.4).green(0.4).blue(0.4),
-                        Color::clear(),
-                    );
-                }
-            }
-            child.draw(point, cursor.map(|cursor| cursor + offset), rt);
-            false
-        });
+    fn handle_draw(&mut self, point: Point, cursor: Option<Point>, rt: &mut dyn Runtime) {
+        // let width = self.width;
+        // self.visit_children(&mut |offset, child| {
+        //     let point = offset + point;
+        //     if let Some(cursor) = cursor {
+        //         if cursor.x >= 0.0
+        //             && cursor.x <= width
+        //             && cursor.y - point.y >= 0.0
+        //             && cursor.y - point.y <= 50.0
+        //         {
+        //             rt.draw_rect(
+        //                 point.x,
+        //                 point.y,
+        //                 width,
+        //                 50.0,
+        //                 0.0,
+        //                 0.0,
+        //                 Color::black().red(0.4).green(0.4).blue(0.4),
+        //                 Color::clear(),
+        //             );
+        //         }
+        //     }
+        //     child.draw(point, cursor.map(|cursor| cursor + offset), rt);
+        //     false
+        // });
 
         let scroll_height = self.file_trees.len() as f32 * 50.0;
         if scroll_height > self.inner_height {
@@ -417,9 +415,9 @@ impl Component for FileForest {
         }
     }
 
-    fn visit_children(&mut self, f: &mut dyn FnMut(Point, &mut dyn Component) -> bool) {
+    fn visit_children(&mut self, visitor: &mut impl Visitor) {
         for (i, file_tree) in self.file_trees.iter_mut().enumerate() {
-            f(
+            visitor.visit(
                 Point {
                     x: file_tree.depth as f32 * 20.0,
                     y: i as f32 * 50.0 - self.scroll_offset,
@@ -429,17 +427,14 @@ impl Component for FileForest {
         }
     }
 
-    fn set_bounds(&mut self, bounds: Size, rt: &mut dyn Runtime) {
+    fn set_bounds(&mut self, bounds: Size) {
         self.width = bounds.width;
         self.inner_height = bounds.height;
         for file_tree in self.file_trees.iter_mut() {
-            file_tree.text.set_bounds(
-                Size {
-                    width: bounds.width,
-                    height: 50.0,
-                },
-                rt,
-            );
+            file_tree.text.set_bounds(Size {
+                width: bounds.width,
+                height: 50.0,
+            });
         }
     }
 
@@ -453,11 +448,29 @@ impl Component for FileForest {
     }
 
     fn handle_click(&mut self, point: Point, rt: &mut dyn Runtime) {
-        let i = ((point.y + self.scroll_offset) / 50.0).floor() as usize;
+        let mut i = ((point.y + self.scroll_offset) / 50.0).floor() as usize;
         if i < self.file_trees.len() {
             let file_tree = &mut self.file_trees[i];
             match &mut file_tree.children {
-                Children::None => {}
+                Children::None => {
+                    let mut depth = file_tree.depth;
+                    let mut segments = vec![file_tree.name.clone()];
+
+                    while depth > 0 {
+                        depth -= 1;
+                        while self.file_trees[i].depth >= depth {
+                            i -= 1;
+                        }
+                        segments.push(self.file_trees[i].name.clone());
+                    }
+
+                    let mut path = path::PathBuf::new();
+                    for segment in segments.iter().rev() {
+                        path.push(segment);
+                    }
+
+                    rt.schedule_event(AppEvent::OpenFile(path));
+                }
                 Children::Inline(empty) => {
                     let mut empty = mem::take(empty);
                     let depth = file_tree.depth;
@@ -475,13 +488,10 @@ impl Component for FileForest {
                 Children::Collapsed(children) => {
                     let mut children = mem::take(children);
                     for child in &mut children {
-                        child.text.set_bounds(
-                            Size {
-                                width: self.width,
-                                height: 50.0,
-                            },
-                            rt,
-                        );
+                        child.text.set_bounds(Size {
+                            width: self.width,
+                            height: 50.0,
+                        });
                     }
 
                     self.file_trees.splice((i + 1)..(i + 1), children.drain(..));

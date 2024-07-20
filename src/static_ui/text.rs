@@ -1,6 +1,8 @@
 use crate::{CachedGlyph, SubpixelPosition};
 
-use super::{AxisAlignment, CachedLine, Color, Component, Point, Runtime, Size, TextProps};
+use super::{
+    AxisAlignment, CachedLine, Color, Component, Point, Runtime, Size, TextProps, Visitor,
+};
 
 #[derive(Clone, Debug)]
 struct CachedTextState {
@@ -147,7 +149,7 @@ impl Component for Text {
         }
     }
 
-    fn set_bounds(&mut self, bounds: Size, rt: &mut dyn Runtime) {
+    fn set_bounds(&mut self, bounds: Size) {
         if let Some(cached) = &mut self.cached {
             cached.last_subpixel_position = None;
         }
@@ -156,12 +158,12 @@ impl Component for Text {
 
     fn size(&self) -> Size {
         let Some(cached) = &self.cached else {
-            panic!("Cannot get size before layout");
+            return Size::ZERO;
         };
 
         cached.size
     }
 
-    fn visit_children(&mut self, _: &mut dyn FnMut(Point, &mut dyn Component) -> bool) {}
+    fn visit_children(&mut self, visitor: &mut impl Visitor) {}
     fn child_size_changed(&mut self, _: &mut dyn Runtime) {}
 }

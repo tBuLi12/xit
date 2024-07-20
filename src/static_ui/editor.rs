@@ -7,7 +7,7 @@ use winit::keyboard;
 
 use crate::{static_ui::text, SubpixelPosition};
 
-use super::{CachedLine, Color, Component, Point, Runtime, Size};
+use super::{CachedLine, Color, Component, Point, Runtime, Size, Visitor};
 
 struct Line {
     text: String,
@@ -66,11 +66,11 @@ impl Line {
 }
 
 impl Component for Editor {
-    fn visit_children(&mut self, _: &mut dyn FnMut(Point, &mut dyn Component) -> bool) {}
+    fn visit_children(&mut self, _: &mut impl Visitor) {}
 
     fn child_size_changed(&mut self, _: &mut dyn Runtime) {}
 
-    fn draw(&mut self, point: Point, _: Option<Point>, rt: &mut dyn Runtime) {
+    fn handle_draw(&mut self, point: Point, _: Option<Point>, rt: &mut dyn Runtime) {
         rt.draw_rect(
             point.x,
             point.y,
@@ -132,7 +132,7 @@ impl Component for Editor {
     //     true
     // }
 
-    fn set_bounds(&mut self, bounds: Size, rt: &mut dyn Runtime) {
+    fn set_bounds(&mut self, bounds: Size) {
         self.size = bounds;
     }
 
@@ -257,7 +257,6 @@ impl Editor {
         let mut x = 0.0;
         for unit in &line.cached.units {
             if self.cursor.byte >= unit.byte_end {
-                eprintln!("advancing by {}", unit.advance);
                 x = unit.advance;
             } else {
                 break;

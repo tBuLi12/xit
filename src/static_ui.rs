@@ -5,12 +5,14 @@ use std::{
 };
 
 use editor::Editor;
+use editor_stack::EditorStack;
 use rows::Rows;
 use swash::shape::cluster::GlyphCluster;
 use text::Text;
 use winit::keyboard;
 
 mod editor;
+mod editor_stack;
 mod file_forest;
 mod rows;
 mod text;
@@ -226,7 +228,7 @@ impl Alignment {
 //     fn mouse_up(&mut self, _: Point, _: &mut dyn Runtime) {}
 //     fn mouse_move(&mut self, _: f32, _: f32, _: &mut dyn Runtime) {}
 
-//     fn set_bounds(&mut self, bounds: Size, rt: &mut dyn Runtime) {
+//     fn set_bounds(&mut self, bounds: Size) {
 //         self.size = bounds;
 //     }
 
@@ -318,6 +320,10 @@ pub trait TextRenderer {
     fn x_height(&self) -> f32;
 }
 
+pub enum AppEvent {
+    OpenFile(PathBuf),
+}
+
 pub trait Runtime {
     // fn next_text_id(&mut self) -> PrimitiveID;
     // fn next_rect_id(&mut self) -> PrimitiveID;
@@ -342,24 +348,106 @@ pub trait Runtime {
         bg_color: Color,
     );
     fn get_text(&mut self, props: TextProps) -> Box<dyn TextRenderer + '_>;
+    fn schedule_event(&mut self, event: AppEvent);
+}
+
+pub trait Visitor {
+    fn visit(&mut self, offset: Point, component: &mut impl Component) -> bool;
+}
+
+struct ClickVisitor<'rt> {
+    rt: &'rt mut dyn Runtime,
+    point: Point,
+}
+
+impl<'rt> Visitor for ClickVisitor<'rt> {
+    fn visit(&mut self, offset: Point, component: &mut impl Component) -> bool {
+        component.click(self.point + offset, self.rt)
+    }
+}
+
+struct MouseMoveVisitor<'rt> {
+    rt: &'rt mut dyn Runtime,
+    dx: f32,
+    dy: f32,
+}
+
+impl<'rt> Visitor for MouseMoveVisitor<'rt> {
+    fn visit(&mut self, _: Point, component: &mut impl Component) -> bool {
+        component.mouse_move(self.dx, self.dy, self.rt);
+        false
+    }
+}
+
+struct MouseUpVisitor<'rt> {
+    rt: &'rt mut dyn Runtime,
+    point: Point,
+}
+
+impl<'rt> Visitor for MouseUpVisitor<'rt> {
+    fn visit(&mut self, offset: Point, component: &mut impl Component) -> bool {
+        component.mouse_up(self.point + offset, self.rt);
+        false
+    }
+}
+
+struct KeyPressedVisitor<'rt, 'k> {
+    rt: &'rt mut dyn Runtime,
+    key: &'k keyboard::Key,
+}
+
+impl<'rt, 'k> Visitor for KeyPressedVisitor<'rt, 'k> {
+    fn visit(&mut self, _: Point, component: &mut impl Component) -> bool {
+        component.key_pressed(self.key, self.rt);
+        false
+    }
+}
+
+struct ScrollVisitor<'rt> {
+    rt: &'rt mut dyn Runtime,
+    dx: f32,
+    dy: f32,
+}
+
+impl<'rt> Visitor for ScrollVisitor<'rt> {
+    fn visit(&mut self, _: Point, component: &mut impl Component) -> bool {
+        component.scroll(self.dx, self.dy, self.rt);
+        false
+    }
+}
+
+struct DrawVisitor<'rt> {
+    rt: &'rt mut dyn Runtime,
+    point: Point,
+    cursor: Option<Point>,
+}
+
+impl<'rt> Visitor for DrawVisitor<'rt> {
+    fn visit(&mut self, offset: Point, component: &mut impl Component) -> bool {
+        component.draw(
+            self.point + offset,
+            self.cursor.map(|cursor| cursor + offset),
+            self.rt,
+        );
+        false
+    }
 }
 
 pub trait Component {
-    fn draw(&mut self, point: Point, cursor: Option<Point>, rt: &mut dyn Runtime);
-    fn set_bounds(&mut self, bounds: Size, rt: &mut dyn Runtime);
+    fn set_bounds(&mut self, bounds: Size);
     fn child_size_changed(&mut self, rt: &mut dyn Runtime);
     fn size(&self) -> Size;
-    fn visit_children(&mut self, f: &mut dyn FnMut(Point, &mut dyn Component) -> bool);
+    fn visit_children(&mut self, visitor: &mut impl Visitor);
+
+    fn draw(&mut self, point: Point, cursor: Option<Point>, rt: &mut dyn Runtime) {
+        self.handle_draw(point, cursor, rt);
+        self.visit_children(&mut DrawVisitor { rt, point, cursor });
+    }
 
     fn click(&mut self, point: Point, rt: &mut dyn Runtime) -> bool {
         if self.size().contains(point) {
             self.handle_click(point, rt);
-            self.visit_children(&mut |offset, child| {
-                if child.click(point + offset, rt) {
-                    return true;
-                }
-                false
-            });
+            self.visit_children(&mut ClickVisitor { rt, point });
             true
         } else {
             false
@@ -368,35 +456,26 @@ pub trait Component {
 
     fn mouse_up(&mut self, point: Point, rt: &mut dyn Runtime) {
         self.handle_mouse_up(point, rt);
-        self.visit_children(&mut |offset, child| {
-            child.mouse_up(point + offset, rt);
-            false
-        });
+        self.visit_children(&mut MouseUpVisitor { rt, point });
     }
 
     fn mouse_move(&mut self, dx: f32, dy: f32, rt: &mut dyn Runtime) {
         self.handle_mouse_move(dx, dy, rt);
-        self.visit_children(&mut |_, child| {
-            child.mouse_move(dx, dy, rt);
-            false
-        });
+        self.visit_children(&mut MouseMoveVisitor { rt, dx, dy });
     }
 
     fn key_pressed(&mut self, key: &keyboard::Key, rt: &mut dyn Runtime) {
         self.handle_key_pressed(key, rt);
-        self.visit_children(&mut |_, child| {
-            child.key_pressed(key, rt);
-            false
-        });
+        self.visit_children(&mut KeyPressedVisitor { rt, key });
     }
 
     fn scroll(&mut self, dx: f32, dy: f32, rt: &mut dyn Runtime) {
         self.handle_scroll(dx, dy, rt);
-        self.visit_children(&mut |_, child| {
-            child.scroll(dx, dy, rt);
-            false
-        });
+        self.visit_children(&mut ScrollVisitor { rt, dx, dy });
     }
+
+    #[allow(unused_variables)]
+    fn handle_draw(&mut self, point: Point, cursor: Option<Point>, rt: &mut dyn Runtime) {}
 
     #[allow(unused_variables)]
     fn handle_click(&mut self, point: Point, rt: &mut dyn Runtime) {}
@@ -457,7 +536,7 @@ impl Button {
 }
 
 impl Component for Button {
-    fn draw(&mut self, point: Point, cursor: Option<Point>, rt: &mut dyn Runtime) {
+    fn handle_draw(&mut self, point: Point, cursor: Option<Point>, rt: &mut dyn Runtime) {
         rt.draw_rect(
             point.x,
             point.y,
@@ -468,8 +547,6 @@ impl Component for Button {
             Color::black().red(1.0),
             Color::black().green(1.0),
         );
-
-        self.text.draw(point, cursor, rt);
     }
 
     fn handle_click(&mut self, _: Point, _: &mut dyn Runtime) {
@@ -478,17 +555,17 @@ impl Component for Button {
         }
     }
 
-    fn set_bounds(&mut self, bounds: Size, rt: &mut dyn Runtime) {
+    fn set_bounds(&mut self, bounds: Size) {
         self.size = Size {
             width: self.width.min(bounds.width),
             height: self.height.min(bounds.height),
         };
-        self.text.set_bounds(self.size, rt);
+        self.text.set_bounds(self.size);
     }
 
     fn child_size_changed(&mut self, _: &mut dyn Runtime) {}
-    fn visit_children(&mut self, f: &mut dyn FnMut(Point, &mut dyn Component) -> bool) {
-        f(Point { x: 0.0, y: 0.0 }, &mut self.text);
+    fn visit_children(&mut self, visitor: &mut impl Visitor) {
+        visitor.visit(Point { x: 0.0, y: 0.0 }, &mut self.text);
     }
 
     fn size(&self) -> Size {
@@ -582,7 +659,7 @@ impl<C: Component> Rect<C> {
 }
 
 impl<C: Component> Component for Rect<C> {
-    fn draw(&mut self, point: Point, cursor: Option<Point>, rt: &mut dyn Runtime) {
+    fn handle_draw(&mut self, point: Point, cursor: Option<Point>, rt: &mut dyn Runtime) {
         rt.draw_rect(
             point.x,
             point.y,
@@ -593,10 +670,9 @@ impl<C: Component> Component for Rect<C> {
             self.bg_color,
             self.border_color,
         );
-        self.inner.draw(point, cursor, rt)
     }
 
-    fn set_bounds(&mut self, bounds: Size, rt: &mut dyn Runtime) {
+    fn set_bounds(&mut self, bounds: Size) {
         self.size = Size {
             width: bounds.width.min(match self.width {
                 Sizing::Auto => self.inner.size().width,
@@ -609,13 +685,13 @@ impl<C: Component> Component for Rect<C> {
                 Sizing::Value(height) => height,
             }),
         };
-        self.inner.set_bounds(self.size, rt);
+        self.inner.set_bounds(self.size);
     }
 
     fn child_size_changed(&mut self, _: &mut dyn Runtime) {}
 
-    fn visit_children(&mut self, f: &mut dyn FnMut(Point, &mut dyn Component) -> bool) {
-        f(Point { x: 0.0, y: 0.0 }, &mut self.inner);
+    fn visit_children(&mut self, visitor: &mut impl Visitor) {
+        visitor.visit(Point { x: 0.0, y: 0.0 }, &mut self.inner);
     }
 
     fn size(&self) -> Size {
@@ -624,22 +700,13 @@ impl<C: Component> Component for Rect<C> {
 }
 
 impl<C: Component> Component for Align<C> {
-    fn draw(&mut self, point: Point, cursor: Option<Point>, rt: &mut dyn Runtime) {
-        let inner_offset = self.inner_offset();
-        self.inner.draw(
-            point + inner_offset,
-            cursor.map(|cursor| cursor + inner_offset),
-            rt,
-        )
-    }
-
-    fn set_bounds(&mut self, bounds: Size, rt: &mut dyn Runtime) {
-        self.inner.set_bounds(bounds, rt);
+    fn set_bounds(&mut self, bounds: Size) {
+        self.inner.set_bounds(bounds);
         self.size = bounds;
     }
 
-    fn visit_children(&mut self, f: &mut dyn FnMut(Point, &mut dyn Component) -> bool) {
-        f(self.inner_offset(), &mut self.inner);
+    fn visit_children(&mut self, visitor: &mut impl Visitor) {
+        visitor.visit(self.inner_offset(), &mut self.inner);
     }
 
     fn child_size_changed(&mut self, _: &mut dyn Runtime) {}
@@ -678,8 +745,7 @@ impl<C1: Component, C2: Component> ResizableCols<C1, C2> {
 }
 
 impl<C1: Component, C2: Component> Component for ResizableCols<C1, C2> {
-    fn draw(&mut self, point: Point, cursor: Option<Point>, rt: &mut dyn Runtime) {
-        self.col1.draw(point, cursor, rt);
+    fn handle_draw(&mut self, point: Point, cursor: Option<Point>, rt: &mut dyn Runtime) {
         rt.draw_rect(
             point.x + self.col1_width,
             point.y,
@@ -694,20 +760,9 @@ impl<C1: Component, C2: Component> Component for ResizableCols<C1, C2> {
             },
             Color::clear(),
         );
-        self.col2.draw(
-            Point {
-                x: point.x + self.col1_width + self.spacer_width,
-                y: point.y,
-            },
-            cursor.map(|cursor| Point {
-                x: cursor.x - self.col1_width - self.spacer_width,
-                y: cursor.y,
-            }),
-            rt,
-        );
     }
 
-    fn set_bounds(&mut self, bounds: Size, rt: &mut dyn Runtime) {
+    fn set_bounds(&mut self, bounds: Size) {
         let old_total_width = self.width() - self.spacer_width;
         self.height = bounds.height;
 
@@ -718,20 +773,14 @@ impl<C1: Component, C2: Component> Component for ResizableCols<C1, C2> {
         self.col1_width = new_total_width * col1_old_fraction;
         self.col2_width = new_total_width * col2_old_fraction;
 
-        self.col1.set_bounds(
-            Size {
-                width: self.col1_width,
-                height: self.height,
-            },
-            rt,
-        );
-        self.col2.set_bounds(
-            Size {
-                width: self.col2_width,
-                height: self.height,
-            },
-            rt,
-        );
+        self.col1.set_bounds(Size {
+            width: self.col1_width,
+            height: self.height,
+        });
+        self.col2.set_bounds(Size {
+            width: self.col2_width,
+            height: self.height,
+        });
     }
 
     fn click(&mut self, point: Point, rt: &mut dyn Runtime) -> bool {
@@ -779,28 +828,22 @@ impl<C1: Component, C2: Component> Component for ResizableCols<C1, C2> {
         if self.dragging {
             self.col1_width += diff;
             self.col2_width -= diff;
-            self.col1.set_bounds(
-                Size {
-                    width: self.col1_width,
-                    height: self.height,
-                },
-                rt,
-            );
-            self.col2.set_bounds(
-                Size {
-                    width: self.col2_width,
-                    height: self.height,
-                },
-                rt,
-            );
+            self.col1.set_bounds(Size {
+                width: self.col1_width,
+                height: self.height,
+            });
+            self.col2.set_bounds(Size {
+                width: self.col2_width,
+                height: self.height,
+            });
         }
     }
 
     fn child_size_changed(&mut self, rt: &mut dyn Runtime) {}
 
-    fn visit_children(&mut self, f: &mut dyn FnMut(Point, &mut dyn Component) -> bool) {
-        f(Point { x: 0.0, y: 0.0 }, &mut self.col1);
-        f(
+    fn visit_children(&mut self, visitor: &mut impl Visitor) {
+        visitor.visit(Point { x: 0.0, y: 0.0 }, &mut self.col1);
+        visitor.visit(
             Point {
                 x: self.col1_width + self.spacer_width,
                 y: 0.0,
@@ -818,21 +861,17 @@ impl<C1: Component, C2: Component> Component for ResizableCols<C1, C2> {
 }
 
 pub struct App {
-    columns: ResizableCols<FileForest, Editor>,
+    columns: ResizableCols<FileForest, EditorStack>,
     pending_renames: Option<Vec<PathBuf>>,
 }
 
 impl Component for App {
-    fn draw(&mut self, point: Point, cursor: Option<Point>, rt: &mut dyn Runtime) {
-        self.columns.draw(point, cursor, rt);
+    fn visit_children(&mut self, visitor: &mut impl Visitor) {
+        visitor.visit(Point { x: 0.0, y: 0.0 }, &mut self.columns);
     }
 
-    fn visit_children(&mut self, f: &mut dyn FnMut(Point, &mut dyn Component) -> bool) {
-        f(Point { x: 0.0, y: 0.0 }, &mut self.columns);
-    }
-
-    fn set_bounds(&mut self, bounds: Size, rt: &mut dyn Runtime) {
-        self.columns.set_bounds(bounds, rt);
+    fn set_bounds(&mut self, bounds: Size) {
+        self.columns.set_bounds(bounds);
     }
 
     fn child_size_changed(&mut self, rt: &mut dyn Runtime) {}
@@ -845,7 +884,7 @@ impl Component for App {
 impl App {
     pub fn new(file_forest: FileForest) -> Self {
         Self {
-            columns: ResizableCols::new(file_forest, Editor::new("Cargo.toml"), 10.0),
+            columns: ResizableCols::new(file_forest, EditorStack::new(), 10.0),
             pending_renames: None,
         }
     }
@@ -899,6 +938,10 @@ impl App {
 
     pub fn rescan_files(&mut self, rt: &mut dyn Runtime) {
         self.columns.col1.rescan_files(rt);
+    }
+
+    pub fn open_file(&mut self, path: path::PathBuf) {
+        self.columns.col2.open(path);
     }
 
     // fn rerender_file_tree(&mut self, rt: &mut dyn Runtime) {
