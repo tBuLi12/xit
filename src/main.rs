@@ -1919,6 +1919,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                         ..
                     } => {
                         eprintln!("{:?}", event);
+
                         match event.state {
                             ElementState::Pressed => {
                                 app_ui.key_pressed(&event.logical_key, &mut renderer);
@@ -1932,7 +1933,6 @@ fn main() -> Result<(), Box<dyn Error>> {
                             app_ui.rescan_files(&mut renderer);
                         }
 
-                        eprintln!("Event: {:?}", event);
                         match event.kind {
                             notify::EventKind::Create(_) => {
                                 app_ui.add_files(&event.paths, &mut renderer);

@@ -382,6 +382,8 @@ impl FileForest {
 }
 
 impl Component for FileForest {
+    type Event = ();
+
     fn handle_draw(&mut self, point: Point, cursor: Option<Point>, rt: &mut dyn Runtime) {
         if let Some(cursor) = cursor {
             if cursor.y < 0.0 {
@@ -482,7 +484,7 @@ impl Component for FileForest {
         }
     }
 
-    fn handle_click(&mut self, point: Point, rt: &mut dyn Runtime) {
+    fn handle_click(&mut self, point: Point, rt: &mut dyn Runtime) -> Option<()> {
         let mut i = ((point.y + self.scroll_offset) / ITEM_HEIGHT).floor() as usize;
         if i < self.file_trees.len() {
             let file_tree = &mut self.file_trees[i];
@@ -537,6 +539,9 @@ impl Component for FileForest {
                 }
             }
             self.clamp_scroll_offset();
+            Some(())
+        } else {
+            None
         }
     }
 

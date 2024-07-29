@@ -1,8 +1,8 @@
 use std::{collections::HashMap, path::PathBuf};
 
 use super::{
-    editor::Editor, rows::Columns, text::TextLine, Align, Color, Component, Point, Rect, Runtime,
-    Size, Visitor,
+    editor::Editor, rows::Columns, text::TextLine, Align, Color, Component, Padded, Point, Rect,
+    Runtime, Size, Visitor,
 };
 
 const TOP_BAR_HEIGHT: f32 = 70.0;
@@ -11,7 +11,7 @@ pub struct EditorStack {
     editors: Vec<Editor>,
     current: Option<usize>,
     path_to_editor: HashMap<PathBuf, usize>,
-    tabs: Columns<Rect<Align<TextLine>>>,
+    tabs: Columns<Rect<Padded<Align<TextLine>>>>,
     size: Size,
 }
 
@@ -46,13 +46,14 @@ impl EditorStack {
             .insert(path.to_path_buf(), self.editors.len() - 1);
 
         self.tabs.push(
-            Rect::new(
+            Rect::new(Padded::new(
                 Align::new(TextLine::new(
                     path.to_string_lossy().to_string(),
                     super::Color::black().red(1.0),
                 ))
                 .vertical_center(),
-            )
+                20.0,
+            ))
             .bg_color(Color::gray(0.12))
             .border_color(Color::gray(0.30))
             .border_width(2.0)
@@ -63,6 +64,8 @@ impl EditorStack {
 }
 
 impl Component for EditorStack {
+    type Event = ();
+
     fn visit_children(&mut self, visitor: &mut impl Visitor) {
         visitor.visit(Point { x: 0.0, y: 0.0 }, &mut self.tabs);
 

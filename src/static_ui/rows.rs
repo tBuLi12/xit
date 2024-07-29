@@ -14,7 +14,14 @@ impl<C: Component> Rows<C> {
     }
 }
 
+pub struct ItemEvent<T> {
+    pub inner: T,
+    pub index: usize,
+}
+
 impl<C: Component> Component for Rows<C> {
+    type Event = ItemEvent<C::Event>;
+
     fn size(&self) -> Size {
         Size {
             width: self
@@ -86,6 +93,8 @@ impl<C: Component> Columns<C> {
 }
 
 impl<C: Component> Component for Columns<C> {
+    type Event = ItemEvent<C::Event>;
+
     fn size(&self) -> Size {
         Size {
             height: self

@@ -53,6 +53,8 @@ impl TextLine {
 }
 
 impl Component for TextLine {
+    type Event = ();
+
     fn draw(&mut self, point: Point, cursor: Option<Point>, rt: &mut dyn Runtime) {
         let (x, y, subpixel_position) = SubpixelPosition::from_f32(point.x, point.y);
 

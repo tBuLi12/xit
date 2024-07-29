@@ -66,6 +66,8 @@ impl Line {
 }
 
 impl Component for Editor {
+    type Event = ();
+
     fn visit_children(&mut self, _: &mut impl Visitor) {}
 
     fn child_size_changed(&mut self, _: &mut dyn Runtime) {}

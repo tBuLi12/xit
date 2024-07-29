@@ -1,4 +1,7 @@
-use std::path::{self, PathBuf};
+use std::{
+    marker::PhantomData,
+    path::{self, PathBuf},
+};
 
 use editor_stack::EditorStack;
 use text::TextLine;
@@ -193,65 +196,117 @@ pub trait Runtime {
 }
 
 pub trait Visitor {
-    fn visit(&mut self, offset: Point, component: &mut impl Component) -> bool;
+    type Event;
+
+    fn visit<C: Component>(
+        &mut self,
+        offset: Point,
+        component: &mut C,
+        map: impl Fn(C::Event) -> Self::Event,
+    ) -> bool;
 }
 
-struct ClickVisitor<'rt> {
+struct ClickVisitor<'rt, F, E> {
     rt: &'rt mut dyn Runtime,
     point: Point,
+    fun: F,
+    _e: PhantomData<fn(E)>,
 }
 
-impl<'rt> Visitor for ClickVisitor<'rt> {
-    fn visit(&mut self, offset: Point, component: &mut impl Component) -> bool {
-        component.click(self.point + offset, self.rt)
+impl<'rt, E, F: Fn(E)> Visitor for ClickVisitor<'rt, F, E> {
+    type Event = E;
+
+    fn visit<C: Component>(
+        &mut self,
+        offset: Point,
+        component: &mut C,
+        map: impl Fn(C::Event) -> E,
+    ) -> bool {
+        component.click(self.point + offset, self.rt, |e| (self.fun)(map(e)))
     }
 }
 
-struct MouseMoveVisitor<'rt> {
+struct MouseMoveVisitor<'rt, F, E> {
     rt: &'rt mut dyn Runtime,
     dx: f32,
     dy: f32,
+    fun: F,
+    _e: PhantomData<fn(E)>,
 }
 
-impl<'rt> Visitor for MouseMoveVisitor<'rt> {
-    fn visit(&mut self, _: Point, component: &mut impl Component) -> bool {
+impl<'rt, F, E> Visitor for MouseMoveVisitor<'rt, F, E> {
+    type Event = E;
+
+    fn visit<C: Component>(
+        &mut self,
+        _: Point,
+        component: &mut C,
+        map: impl Fn(C::Event) -> E,
+    ) -> bool {
         component.mouse_move(self.dx, self.dy, self.rt);
         false
     }
 }
 
-struct MouseUpVisitor<'rt> {
+struct MouseUpVisitor<'rt, F, E> {
     rt: &'rt mut dyn Runtime,
     point: Point,
+    fun: F,
+    _e: PhantomData<fn(E)>,
 }
 
-impl<'rt> Visitor for MouseUpVisitor<'rt> {
-    fn visit(&mut self, offset: Point, component: &mut impl Component) -> bool {
+impl<'rt, F, E> Visitor for MouseUpVisitor<'rt, F, E> {
+    type Event = E;
+
+    fn visit<C: Component>(
+        &mut self,
+        offset: Point,
+        component: &mut C,
+        map: impl Fn(C::Event) -> E,
+    ) -> bool {
         component.mouse_up(self.point + offset, self.rt);
         false
     }
 }
 
-struct KeyPressedVisitor<'rt, 'k> {
+struct KeyPressedVisitor<'rt, 'k, F, E> {
     rt: &'rt mut dyn Runtime,
     key: &'k keyboard::Key,
+    fun: F,
+    _e: PhantomData<fn(E)>,
 }
 
-impl<'rt, 'k> Visitor for KeyPressedVisitor<'rt, 'k> {
-    fn visit(&mut self, _: Point, component: &mut impl Component) -> bool {
+impl<'rt, 'k, F, E> Visitor for KeyPressedVisitor<'rt, 'k, F, E> {
+    type Event = E;
+
+    fn visit<C: Component>(
+        &mut self,
+        _: Point,
+        component: &mut C,
+        map: impl Fn(C::Event) -> E,
+    ) -> bool {
         component.key_pressed(self.key, self.rt);
         false
     }
 }
 
-struct ScrollVisitor<'rt> {
+struct ScrollVisitor<'rt, F, E> {
     rt: &'rt mut dyn Runtime,
     dx: f32,
     dy: f32,
+    fun: F,
+    _e: PhantomData<fn(E)>,
 }
 
-impl<'rt> Visitor for ScrollVisitor<'rt> {
-    fn visit(&mut self, _: Point, component: &mut impl Component) -> bool {
+impl<'rt, F, E> Visitor for ScrollVisitor<'rt, F, E> {
+    type Event = E;
+
+    fn visit<C: Component>(
+        &mut self,
+        _: Point,
+        component: &mut C,
+        map: impl Fn(C::Event) -> E,
+    ) -> bool {
         component.scroll(self.dx, self.dy, self.rt);
         false
     }
@@ -264,7 +319,14 @@ struct DrawVisitor<'rt> {
 }
 
 impl<'rt> Visitor for DrawVisitor<'rt> {
-    fn visit(&mut self, offset: Point, component: &mut impl Component) -> bool {
+    type Event = ();
+
+    fn visit<C: Component>(
+        &mut self,
+        offset: Point,
+        component: &mut C,
+        map: impl Fn(C::Event) -> E,
+    ) -> bool {
         component.draw(
             self.point + offset,
             self.cursor.map(|cursor| cursor + offset),
@@ -275,6 +337,8 @@ impl<'rt> Visitor for DrawVisitor<'rt> {
 }
 
 pub trait Component {
+    type Event;
+
     fn set_bounds(&mut self, bounds: Size, rt: &mut dyn Runtime);
     fn child_size_changed(&mut self, rt: &mut dyn Runtime);
     fn size(&self) -> Size;
@@ -285,9 +349,9 @@ pub trait Component {
         self.visit_children(&mut DrawVisitor { rt, point, cursor });
     }
 
-    fn click(&mut self, point: Point, rt: &mut dyn Runtime) -> bool {
+    fn click(&mut self, point: Point, rt: &mut dyn Runtime, fun: impl Fn(Self::Event)) -> bool {
         if self.size().contains(point) {
-            self.handle_click(point, rt);
+            let event = self.handle_click(point, rt);
             self.visit_children(&mut ClickVisitor { rt, point });
             true
         } else {
@@ -319,7 +383,9 @@ pub trait Component {
     fn handle_draw(&mut self, point: Point, cursor: Option<Point>, rt: &mut dyn Runtime) {}
 
     #[allow(unused_variables)]
-    fn handle_click(&mut self, point: Point, rt: &mut dyn Runtime) {}
+    fn handle_click(&mut self, point: Point, rt: &mut dyn Runtime) -> Option<Self::Event> {
+        None
+    }
 
     #[allow(unused_variables)]
     fn handle_mouse_up(&mut self, point: Point, rt: &mut dyn Runtime) {}
@@ -376,6 +442,8 @@ impl Button {
 }
 
 impl Component for Button {
+    type Event = ();
+
     fn handle_draw(&mut self, point: Point, cursor: Option<Point>, rt: &mut dyn Runtime) {
         rt.draw_rect(
             point.x,
@@ -389,10 +457,12 @@ impl Component for Button {
         );
     }
 
-    fn handle_click(&mut self, _: Point, _: &mut dyn Runtime) {
+    fn handle_click(&mut self, _: Point, _: &mut dyn Runtime) -> Option<Self::Event> {
         if let Some(on_click) = &mut self._on_click {
             (on_click)();
         }
+
+        None
     }
 
     fn set_bounds(&mut self, bounds: Size, rt: &mut dyn Runtime) {
@@ -524,6 +594,8 @@ impl<C: Component> Rect<C> {
 }
 
 impl<C: Component> Component for Rect<C> {
+    type Event = C::Event;
+
     fn handle_draw(&mut self, point: Point, cursor: Option<Point>, rt: &mut dyn Runtime) {
         rt.draw_rect(
             point.x,
@@ -572,6 +644,8 @@ impl<C: Component> Component for Rect<C> {
 }
 
 impl<C: Component> Component for Align<C> {
+    type Event = C::Event;
+
     fn set_bounds(&mut self, bounds: Size, rt: &mut dyn Runtime) {
         self.inner.set_bounds(bounds, rt);
         self.size = Size {
@@ -596,6 +670,51 @@ impl<C: Component> Component for Align<C> {
 
     fn size(&self) -> Size {
         self.size
+    }
+}
+
+struct Padded<C> {
+    padding: f32,
+    inner: C,
+}
+
+impl<C: Component> Component for Padded<C> {
+    type Event = C::Event;
+
+    fn set_bounds(&mut self, bounds: Size, rt: &mut dyn Runtime) {
+        self.inner.set_bounds(
+            Size {
+                width: bounds.width - self.padding * 2.0,
+                height: bounds.height - self.padding * 2.0,
+            },
+            rt,
+        );
+    }
+
+    fn child_size_changed(&mut self, _: &mut dyn Runtime) {}
+
+    fn visit_children(&mut self, visitor: &mut impl Visitor) {
+        visitor.visit(
+            Point {
+                x: self.padding,
+                y: self.padding,
+            },
+            &mut self.inner,
+        );
+    }
+
+    fn size(&self) -> Size {
+        let inner_size = self.inner.size();
+        Size {
+            width: inner_size.width + self.padding * 2.0,
+            height: inner_size.height + self.padding * 2.0,
+        }
+    }
+}
+
+impl<C: Component> Padded<C> {
+    pub fn new(inner: C, padding: f32) -> Self {
+        Self { inner, padding }
     }
 }
 
@@ -627,7 +746,14 @@ impl<C1: Component, C2: Component> ResizableCols<C1, C2> {
     }
 }
 
+enum ColumnsEvent<L, R> {
+    Left(L),
+    Right(R),
+}
+
 impl<C1: Component, C2: Component> Component for ResizableCols<C1, C2> {
+    type Event = ColumnsEvent<C1::Event, C2::Event>;
+
     fn handle_draw(&mut self, point: Point, cursor: Option<Point>, rt: &mut dyn Runtime) {
         rt.draw_rect(
             point.x + self.col1_width,
@@ -672,29 +798,12 @@ impl<C1: Component, C2: Component> Component for ResizableCols<C1, C2> {
         );
     }
 
-    fn click(&mut self, point: Point, rt: &mut dyn Runtime) -> bool {
-        if point.x >= 0.0 && point.x <= self.col1_width {
-            return self.col1.click(point, rt);
-        }
-
+    fn handle_click(&mut self, point: Point, rt: &mut dyn Runtime) -> Option<Self::Event> {
         if point.x >= self.col1_width && point.x <= self.col1_width + self.spacer_width {
             self.dragging = true;
-            return true;
         }
 
-        if point.x >= self.col1_width + self.spacer_width
-            && point.x <= self.col1_width + self.spacer_width + self.col2_width
-        {
-            return self.col2.click(
-                Point {
-                    x: point.x - self.col1_width - self.spacer_width,
-                    y: point.y,
-                },
-                rt,
-            );
-        }
-
-        false
+        None
     }
 
     fn mouse_up(&mut self, point: Point, rt: &mut dyn Runtime) {
@@ -761,6 +870,8 @@ pub struct App {
 }
 
 impl Component for App {
+    type Event = ();
+
     fn visit_children(&mut self, visitor: &mut impl Visitor) {
         visitor.visit(Point { x: 0.0, y: 0.0 }, &mut self.columns);
     }
