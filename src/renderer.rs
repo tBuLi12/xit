@@ -5,7 +5,7 @@ use std::{
     f32::consts::E,
     hint::black_box,
     marker::PhantomData,
-    mem,
+    mem::{self, ManuallyDrop},
     num::NonZero,
     ops::{self, Deref},
     ptr,
@@ -204,12 +204,12 @@ fn blend(background: Color, color: Color, alphas: Color) -> Color {
 //     }
 // }
 
-pub struct Child<'state> {
+pub struct Child {
     pub position: Offset,
-    pub rect: Rect<'state>,
+    pub rect: Rect,
 }
 
-impl<'state> Child<'state> {
+impl Child {
     fn to_inner(&self, offset: Offset) -> Option<Offset> {
         if offset.x >= self.position.x
             && offset.x < self.position.x + self.rect.size.width
@@ -227,40 +227,77 @@ impl<'state> Child<'state> {
     }
 }
 
-#[derive(Clone, Copy)]
-pub struct ClickHandler<'state> {
-    ptr: *const u8,
-    fun: fn(*const u8),
-    _borrowed: PhantomData<&'state ()>,
+// pub struct ClickHandler {
+//     fun: Box<dyn Fn()>,
+// }
+
+// impl ClickHandler {
+//     pub fn new<T>(state: &'state T, mutate: fn(&mut T)) -> Self {
+//         Self {
+//             _borrowed: PhantomData,
+//             fun: unsafe { mem::transmute(mutate) },
+//             ptr: state as *const _ as *const u8,
+//         }
+//     }
+// }
+
+// #[derive(Clone, Copy)]
+// pub struct KeyHandler {
+//     ptr: *const u8,
+//     fun: fn(*const u8, key: &keyboard::Key<SmolStr>, modifiers: ModifiersState),
+//     _borrowed: PhantomData<&'state ()>,
+// }
+
+// impl KeyHandler {
+//     pub fn new<T>(
+//         state: &'state T,
+//         mutate: fn(&mut T, &keyboard::Key<SmolStr>, ModifiersState),
+//     ) -> Self {
+//         Self {
+//             _borrowed: PhantomData,
+//             fun: unsafe { mem::transmute(mutate) },
+//             ptr: state as *const _ as *const u8,
+//         }
+//     }
+// }
+
+enum UserEvent {
+    RunHandler {
+        handler_id: u64,
+        value: Box<dyn Any + Send>,
+    },
+    DropHandler {
+        handler_id: u64,
+    },
 }
 
-impl<'state> ClickHandler<'state> {
-    pub fn new<T>(state: &'state T, mutate: fn(&mut T)) -> Self {
-        Self {
-            _borrowed: PhantomData,
-            fun: unsafe { mem::transmute(mutate) },
-            ptr: state as *const _ as *const u8,
-        }
+pub struct AsyncHandler<T> {
+    handler_id: u64,
+    proxy: EventLoopProxy<UserEvent>,
+    _marker: PhantomData<fn(T)>,
+}
+
+impl<T: Send + 'static> AsyncHandler<T> {
+    // fn new(fun: impl Fn(T) + 'static) -> Self {
+    //     Self {
+    //         fun: ManuallyDrop::new(Box::new(fun)),
+    //         proxy: EventLoopProxy::new(),
+    //     }
+    // }
+
+    pub fn run(&self, value: T) {
+        let _ = self.proxy.send_event(UserEvent::RunHandler {
+            handler_id: self.handler_id,
+            value: Box::new(value),
+        });
     }
 }
 
-#[derive(Clone, Copy)]
-pub struct KeyHandler<'state> {
-    ptr: *const u8,
-    fun: fn(*const u8, key: &keyboard::Key<SmolStr>, modifiers: ModifiersState),
-    _borrowed: PhantomData<&'state ()>,
-}
-
-impl<'state> KeyHandler<'state> {
-    pub fn new<T>(
-        state: &'state T,
-        mutate: fn(&mut T, &keyboard::Key<SmolStr>, ModifiersState),
-    ) -> Self {
-        Self {
-            _borrowed: PhantomData,
-            fun: unsafe { mem::transmute(mutate) },
-            ptr: state as *const _ as *const u8,
-        }
+impl<T> Drop for AsyncHandler<T> {
+    fn drop(&mut self) {
+        let _ = self.proxy.send_event(UserEvent::DropHandler {
+            handler_id: self.handler_id,
+        });
     }
 }
 
@@ -271,17 +308,20 @@ pub enum Fill {
     None,
 }
 
-pub struct Rect<'state> {
+pub type ClickHandler = Box<dyn Fn()>;
+pub type KeyHandler = Box<dyn Fn(&keyboard::Key<SmolStr>, ModifiersState)>;
+
+pub struct Rect {
     pub size: Size,
-    pub children: Vec<Child<'state>>,
+    pub children: Vec<Child>,
     pub fill: Fill,
     pub radius: f32,
-    pub on_click: Option<ClickHandler<'state>>,
-    pub on_key_pressed: Option<KeyHandler<'state>>,
+    pub on_click: Option<ClickHandler>,
+    pub on_key_pressed: Option<KeyHandler>,
     pub do_layout: Option<fn(&mut Rect)>,
 }
 
-impl<'state> Rect<'state> {
+impl Rect {
     fn click(&self, offset: Offset) -> bool {
         let Self {
             size,
@@ -298,7 +338,7 @@ impl<'state> Rect<'state> {
             }
         }
         if let Some(handler) = on_click {
-            (handler.fun)(handler.ptr);
+            handler();
             return true;
         }
         false
@@ -311,7 +351,7 @@ impl<'state> Rect<'state> {
             }
         }
         if let Some(handler) = &self.on_key_pressed {
-            (handler.fun)(handler.ptr, key, modifiers);
+            handler(key, modifiers);
             return true;
         }
         false
@@ -562,7 +602,7 @@ fn draw(canvas: &mut Canvas, rect: &Rect, view: softbuffer::Rect) {
 struct App<T> {
     surface: Option<Surface<Rc<Window>, Rc<Window>>>,
     create_fragment: fn(&T) -> Rect,
-    fragment: Option<Rect<'static>>,
+    fragment: Option<Rect>,
     state: Box<T>,
     cursor: Offset,
     size: Size,
@@ -574,8 +614,6 @@ struct App<T> {
 impl<T: 'static> App<T> {
     pub fn new(init_state: T, create_fragment: fn(&T) -> Rect) -> Self {
         let state = Box::new(init_state);
-        // let fragment = create_fragment(&state);
-        // let fragment = unsafe { mem::transmute::<Rect<'_>, Rect<'static>>(fragment) };
 
         Self {
             state,
@@ -594,9 +632,7 @@ impl<T: 'static> App<T> {
     }
 
     fn create_fragment(&mut self, bounds: Size) -> (Option<Rect>, &Rect) {
-        let mut fragment = unsafe {
-            mem::transmute::<Rect<'_>, Rect<'static>>((self.create_fragment)(&self.state))
-        };
+        let mut fragment = (self.create_fragment)(&self.state);
 
         fragment.do_layout.unwrap_or(default_layout)(&mut fragment);
 
@@ -605,7 +641,7 @@ impl<T: 'static> App<T> {
     }
 }
 
-impl<T: 'static> winit::application::ApplicationHandler for App<T> {
+impl<T: 'static> winit::application::ApplicationHandler<UserEvent> for App<T> {
     fn resumed(&mut self, event_loop: &winit::event_loop::ActiveEventLoop) {
         let window = Rc::new(
             event_loop
@@ -617,7 +653,18 @@ impl<T: 'static> winit::application::ApplicationHandler for App<T> {
         self.surface = Some(surface);
     }
 
-    fn user_event(&mut self, event_loop: &winit::event_loop::ActiveEventLoop, event: ()) {}
+    fn user_event(&mut self, event_loop: &winit::event_loop::ActiveEventLoop, event: UserEvent) {
+        ASYNC_HANDLERS.with_borrow_mut(|map| match event {
+            UserEvent::DropHandler { handler_id } => {
+                map.remove(&handler_id);
+            }
+            UserEvent::RunHandler { handler_id, value } => {
+                if let Some(handler) = map.get(&handler_id) {
+                    handler(value);
+                }
+            }
+        });
+    }
 
     fn window_event(
         &mut self,
@@ -720,19 +767,48 @@ impl<T: 'static> winit::application::ApplicationHandler for App<T> {
     }
 }
 
+thread_local! {
+    static ASYNC_HANDLERS: RefCell<HashMap<u64, Box<dyn Fn(Box<dyn Any>)>>> = RefCell::new(HashMap::new());
+    static CURRENT_LOOP: RefCell<Option<EventLoopProxy<UserEvent>>> = RefCell::new(None);
+}
+
 pub fn run<T: 'static>(init_state: T, create_root: fn(&T) -> Rect) {
-    let event_loop = EventLoop::new().unwrap();
-    event_loop.create_proxy();
+    let event_loop = EventLoop::<UserEvent>::with_user_event().build().unwrap();
+    CURRENT_LOOP.replace(Some(event_loop.create_proxy()));
     event_loop
         .run_app(&mut App::new(init_state, create_root))
         .unwrap();
 }
 
+pub fn async_handler<T: 'static>(handler: impl Fn(T) + 'static) -> AsyncHandler<T> {
+    let handler_id = NEXT_HANDLER_ID.with_borrow_mut(|id| {
+        let value = *id;
+        *id += 1;
+        value
+    });
+
+    ASYNC_HANDLERS.with_borrow_mut(|map| {
+        map.insert(
+            handler_id,
+            Box::new(move |any| handler(*any.downcast().unwrap())),
+        )
+    });
+
+    let proxy = CURRENT_LOOP.with_borrow(|proxy| proxy.as_ref().unwrap().clone());
+
+    AsyncHandler {
+        handler_id,
+        proxy,
+        _marker: PhantomData,
+    }
+}
+
 thread_local! {
+    static NEXT_HANDLER_ID: RefCell<u64> = RefCell::new(0);
     static TEXT_RENDERER: RefCell<TextRenderer> = RefCell::new(TextRenderer::new());
 }
 
-pub struct TextRenderer {
+struct TextRenderer {
     shape_context: swash::shape::ShapeContext,
     scale_context: swash::scale::ScaleContext,
     glyph_cache: HashMap<GlyphKey, CachedGlyph>,
@@ -871,7 +947,7 @@ impl TextRenderer {
     }
 }
 
-pub fn text(text: &str) -> Rect<'static> {
+pub fn text(text: &str) -> Rect {
     let glyphs = TEXT_RENDERER.with_borrow_mut(|text_renderer| text_renderer.get_glyphs(text));
 
     let right = glyphs
@@ -977,12 +1053,6 @@ pub fn center(rect: &mut Rect) {
     }
 }
 
-// thread_local! {
-
-// }
-
-pub fn async_work<R: Send>(
-    work: impl FnOnce() -> R + Send + 'static,
-    done: impl FnOnce(R) + 'static,
-) {
+pub fn on_key(fun: impl Fn(&keyboard::Key<SmolStr>, ModifiersState) + 'static) -> KeyHandler {
+    Box::new(fun)
 }

@@ -1,30 +1,35 @@
 mod renderer;
 
-use renderer::{center, rows, text, Child, Color, Fill, KeyHandler, Offset, Rect, Size};
+use std::{cell::RefCell, rc::Rc};
+
+use renderer::{center, on_key, rows, text, Child, Color, Fill, KeyHandler, Offset, Rect, Size};
 use winit::keyboard::{Key, NamedKey};
 
 // fn dir_finder()
 
 fn main() {
-    renderer::run("".to_string(), counter);
+    renderer::run(Rc::new(RefCell::new("".to_string())), counter);
 }
 
-fn counter(str: &String) -> Rect {
-    let on_key = KeyHandler::new(str, |text, key, modifiers| match key {
-        Key::Character(character) => {
-            text.push_str(&character);
-        }
-        Key::Named(named) => match named {
-            NamedKey::Enter => {
-                // text.push("".to_string());
+fn counter(str: &Rc<RefCell<String>>) -> Rect {
+    let on_key = {
+        let text = str.clone();
+        on_key(move |key, modifiers| match key {
+            Key::Character(character) => {
+                text.borrow_mut().push_str(&character);
             }
-            NamedKey::Space => {
-                text.push_str(" ");
-            }
+            Key::Named(named) => match named {
+                NamedKey::Enter => {
+                    // text.push("".to_string());
+                }
+                NamedKey::Space => {
+                    text.borrow_mut().push_str(" ");
+                }
+                _ => {}
+            },
             _ => {}
-        },
-        _ => {}
-    });
+        })
+    };
 
     Rect {
         size: Size {
@@ -39,7 +44,7 @@ fn counter(str: &String) -> Rect {
             // rect: rows(str.iter().map(|str| text(str)).collect()),
             rect: Rect {
                 children: vec![Child {
-                    rect: text(str),
+                    rect: text(&str.borrow()),
                     position: Offset { x: 0, y: 0 },
                 }],
                 do_layout: None,
