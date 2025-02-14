@@ -1,0 +1,9 @@
+[package]
+name = "ui-renderer"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+softbuffer = "0.4.6"
+swash = "0.2.0"
+winit = "0.30.9"
