@@ -1266,15 +1266,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d2df906b07856748fa3f6e0ad0cbaa047052d4a7dd609e231c4f72cee8c36f31"
 
 [[package]]
-name = "ui-renderer"
-version = "0.1.0"
-dependencies = [
- "softbuffer",
- "swash",
- "winit",
-]
-
-[[package]]
 name = "unicode-ident"
 version = "1.0.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1820,6 +1811,15 @@ name = "xcursor"
 version = "0.3.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0ef33da6b1660b4ddbfb3aef0ade110c8b8a781a3b6382fa5f2b5b040fd55f61"
+
+[[package]]
+name = "xit"
+version = "0.1.0"
+dependencies = [
+ "softbuffer",
+ "swash",
+ "winit",
+]
 
 [[package]]
 name = "xkbcommon-dl"

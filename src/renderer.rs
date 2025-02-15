@@ -1,23 +1,11 @@
 use std::{
-    any::Any,
-    cell::RefCell,
-    collections::HashMap,
-    f32::consts::E,
-    hint::black_box,
-    marker::PhantomData,
-    mem::{self, ManuallyDrop},
-    num::NonZero,
-    ops::{self, Deref},
-    ptr,
-    rc::Rc,
-    sync::Arc,
-    time::Instant,
-    u8,
+    any::Any, cell::RefCell, collections::HashMap, marker::PhantomData, num::NonZero, ops, ptr,
+    rc::Rc, time::Instant, u8,
 };
 
 use softbuffer::Surface;
 use winit::{
-    event::{Modifiers, WindowEvent},
+    event::WindowEvent,
     event_loop::{EventLoop, EventLoopProxy},
     keyboard::{self, ModifiersState, SmolStr},
     window::{Window, WindowAttributes},
@@ -318,7 +306,7 @@ pub struct Rect {
     pub radius: f32,
     pub on_click: Option<ClickHandler>,
     pub on_key_pressed: Option<KeyHandler>,
-    pub do_layout: Option<fn(&mut Rect)>,
+    pub do_layout: Option<fn(&mut Rect, Size)>,
 }
 
 impl Rect {
@@ -634,7 +622,7 @@ impl<T: 'static> App<T> {
     fn create_fragment(&mut self, bounds: Size) -> (Option<Rect>, &Rect) {
         let mut fragment = (self.create_fragment)(&self.state);
 
-        fragment.do_layout.unwrap_or(default_layout)(&mut fragment);
+        fragment.do_layout.unwrap_or(default_layout)(&mut fragment, bounds);
 
         let old = self.fragment.replace(fragment);
         (old, self.fragment.as_mut().unwrap())
@@ -854,6 +842,11 @@ fn split(num: f32) -> (i32, SubpixelPosition) {
     (whole, SubpixelPosition::new(fract))
 }
 
+struct TextLine {
+    glyphs: Vec<CachedGlyph>,
+    x_height: f32,
+}
+
 impl TextRenderer {
     pub fn new() -> Self {
         Self {
@@ -863,11 +856,13 @@ impl TextRenderer {
         }
     }
 
-    pub fn get_glyphs(&mut self, text: &str) -> Vec<CachedGlyph> {
+    pub fn get_glyphs(&mut self, text: &str) -> TextLine {
         let size = 60.0;
         let font = swash::FontRef::from_index(include_bytes!("../ARIAL.TTF"), 0).unwrap();
 
         let mut shaper = self.shape_context.builder(font).size(size).build();
+
+        let x_height = shaper.metrics().x_height;
 
         let mut scaler = self
             .scale_context
@@ -943,12 +938,15 @@ impl TextRenderer {
         });
 
         // cached.width = advance;
-        glyphs
+        TextLine { glyphs, x_height }
     }
 }
 
 pub fn text(text: &str) -> Rect {
-    let glyphs = TEXT_RENDERER.with_borrow_mut(|text_renderer| text_renderer.get_glyphs(text));
+    let TextLine { glyphs, x_height } =
+        TEXT_RENDERER.with_borrow_mut(|text_renderer| text_renderer.get_glyphs(text));
+
+    let height = 80.0;
 
     let right = glyphs
         .iter()
@@ -957,14 +955,6 @@ pub fn text(text: &str) -> Rect {
         .unwrap_or(0);
 
     let left = glyphs.iter().map(|glyph| glyph.left).min().unwrap_or(0);
-
-    let top = glyphs.iter().map(|glyph| -glyph.top).min().unwrap_or(0);
-
-    let bottom = glyphs
-        .iter()
-        .map(|glyph| glyph.size.height as i32 - glyph.top)
-        .max()
-        .unwrap_or(0);
 
     let children: Vec<_> = glyphs
         .into_iter()
@@ -980,7 +970,7 @@ pub fn text(text: &str) -> Rect {
             },
             position: Offset {
                 x: (glyph.left - left) as usize,
-                y: -(top + glyph.top) as usize,
+                y: (((height + x_height) / 2.0) as i32 - glyph.top) as usize,
             },
         })
         .collect();
@@ -988,7 +978,7 @@ pub fn text(text: &str) -> Rect {
     Rect {
         size: Size {
             width: (right - left) as usize,
-            height: (bottom - top) as usize,
+            height: height as usize,
         },
         radius: 0.0,
         children,
@@ -1030,20 +1020,25 @@ pub fn rows(children: Vec<Rect>) -> Rect {
     }
 }
 
-pub fn default_layout(rect: &mut Rect) {
+pub fn default_layout(rect: &mut Rect, bounds: Size) {
+    rect.size.height = bounds.height.max(rect.size.height);
+    rect.size.width = bounds.width.max(rect.size.width);
+
     for child in &mut rect.children {
         if let Some(do_layout) = child.rect.do_layout {
-            do_layout(&mut child.rect);
+            do_layout(&mut child.rect, bounds);
         } else {
-            default_layout(&mut child.rect);
+            default_layout(&mut child.rect, bounds);
         }
     }
 }
 
-pub fn center(rect: &mut Rect) {
+pub fn center(rect: &mut Rect, bounds: Size) {
+    rect.size = bounds;
+
     for child in &mut rect.children {
         if let Some(do_layout) = child.rect.do_layout {
-            do_layout(&mut child.rect);
+            do_layout(&mut child.rect, bounds);
         }
 
         child.position = Offset {
