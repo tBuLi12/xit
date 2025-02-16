@@ -310,6 +310,49 @@ pub struct Rect {
 }
 
 impl Rect {
+    pub fn new() -> Self {
+        Rect {
+            size: Size {
+                width: 0,
+                height: 0,
+            },
+            children: vec![],
+            fill: Fill::None,
+            radius: 0.0,
+            on_click: None,
+            on_key_pressed: None,
+            do_layout: None,
+        }
+    }
+
+    pub fn on_key(
+        mut self,
+        fun: impl Fn(&keyboard::Key<SmolStr>, ModifiersState) + 'static,
+    ) -> Self {
+        self.on_key_pressed = Some(Box::new(fun));
+        self
+    }
+
+    pub fn fill_color(mut self, color: Color) -> Self {
+        self.fill = Fill::Color(color);
+        self
+    }
+
+    pub fn rounded(mut self, radius: f32) -> Self {
+        self.radius = radius;
+        self
+    }
+
+    pub fn layout(mut self, layout_fn: fn(&mut Rect, Size)) -> Self {
+        self.do_layout = Some(layout_fn);
+        self
+    }
+
+    pub fn children(mut self, children: Vec<Child>) -> Self {
+        self.children = children;
+        self
+    }
+
     fn click(&self, offset: Offset) -> bool {
         let Self {
             size,

@@ -8,6 +8,7 @@ use winit::keyboard::{Key, NamedKey};
 struct State {
     search: String,
     files: Vec<String>,
+    selected: usize,
     scan_pending: bool,
 }
 
@@ -16,6 +17,7 @@ fn main() {
         Rc::new(RefCell::new(State {
             search: String::new(),
             files: vec![],
+            selected: 0,
             scan_pending: false,
         })),
         counter,
@@ -43,61 +45,64 @@ fn counter(state: &Rc<RefCell<State>>) -> Rect {
         state.borrow_mut().scan_pending = true;
     }
 
-    let on_key = {
-        let text = state.clone();
-        on_key(move |key, modifiers| match key {
-            Key::Character(character) => {
-                text.borrow_mut().search.push_str(&character);
-            }
-            Key::Named(named) => match named {
-                NamedKey::Enter => {
-                    // text.push("".to_string());
+    Rect::new()
+        .fill_color(Color::gray(40))
+        .on_key({
+            let text = state.clone();
+            move |key, _modifiers| match key {
+                Key::Character(character) => {
+                    text.borrow_mut().search.push_str(&character);
                 }
-                NamedKey::Space => {
-                    text.borrow_mut().search.push_str(" ");
-                }
-                NamedKey::Backspace => {
-                    text.borrow_mut().search.pop();
-                }
+                Key::Named(named) => match named {
+                    NamedKey::Enter => {
+                        // text.push("".to_string());
+                    }
+                    NamedKey::Space => {
+                        text.borrow_mut().search.push_str(" ");
+                    }
+                    NamedKey::Backspace => {
+                        text.borrow_mut().search.pop();
+                    }
+                    NamedKey::ArrowDown => {
+                        text.borrow_mut().selected += 1;
+                    }
+                    NamedKey::ArrowUp => {
+                        text.borrow_mut().selected -= 1;
+                    }
+                    _ => {}
+                },
                 _ => {}
-            },
-            _ => {}
+            }
         })
-    };
-
-    Rect {
-        size: Size {
-            width: 2_800,
-            height: 1_650,
-        },
-        fill: Fill::Color(Color::gray(40)),
-        on_click: None,
-        radius: 0.0,
-        on_key_pressed: Some(on_key),
-        children: vec![Child {
-            rect: Rect {
-                children: vec![Child {
+        .layout(center)
+        .children(vec![Child {
+            rect: Rect::new()
+                .fill_color(Color::gray(60))
+                .rounded(5.0)
+                .children(vec![Child {
                     rect: rows(
-                        iter::once(&state.borrow().search)
-                            .chain(state.borrow().files.iter())
-                            .filter(|str| str.contains(&state.borrow().search))
-                            .map(|str| text(str))
+                        iter::once((None, &state.borrow().search))
+                            .chain(
+                                state
+                                    .borrow()
+                                    .files
+                                    .iter()
+                                    .filter(|str| str.contains(&state.borrow().search))
+                                    .enumerate()
+                                    .map(|(i, str)| (Some(i), str)),
+                            )
+                            .map(|(i, str)| {
+                                let text = text(str);
+                                if i == Some(state.borrow().selected) {
+                                    text.fill_color(Color::gray(100))
+                                } else {
+                                    text
+                                }
+                            })
                             .collect(),
                     ),
                     position: Offset { x: 0, y: 0 },
-                }],
-                do_layout: None,
-                fill: Fill::Color(Color::gray(60)),
-                on_click: None,
-                on_key_pressed: None,
-                radius: 5.0,
-                size: Size {
-                    width: 1400,
-                    height: 1400,
-                },
-            },
+                }]),
             position: Offset { x: 0, y: 0 },
-        }],
-        do_layout: Some(center),
-    }
+        }])
 }
