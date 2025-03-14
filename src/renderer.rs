@@ -1,17 +1,20 @@
 use std::{
-    any::Any, cell::RefCell, collections::HashMap, marker::PhantomData, num::NonZero, ops, ptr,
-    rc::Rc, time::Instant, u8,
+    any::Any, cell::RefCell, collections::HashMap, marker::PhantomData, mem, num::NonZero, ops,
+    ptr, rc::Rc, time::Instant, u8,
 };
 
 use softbuffer::Surface;
+use widgets::Widget;
 use winit::{
     event::WindowEvent,
     event_loop::{EventLoop, EventLoopProxy},
     keyboard::{self, ModifiersState, SmolStr},
-    window::{Window, WindowAttributes},
+    window::{Cursor, Window, WindowAttributes},
 };
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+pub mod widgets;
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Size {
     pub width: usize,
     pub height: usize,
@@ -107,91 +110,6 @@ fn blend(background: Color, color: Color, alphas: Color) -> Color {
     }
 }
 
-// pub trait Widget<'state> {
-//     // fn click(&self, offset: Offset) -> Option<ClickHandler>;
-//     fn rect(&self, bounds: Size) -> Rect<'state>;
-// }
-
-// pub struct Text<'state> {
-//     pub text: &'state str,
-// }
-
-// impl<'state> Widget<'state> for Text<'state> {
-//     fn rect(&self, bounds: Size) -> Rect<'state> {
-//         text(&self.text)
-//     }
-// }
-
-// pub struct SizedRect<C> {
-//     pub size: Size,
-//     pub fill: Fill,
-//     pub radius: f32,
-//     pub children: C,
-// }
-
-// impl<'state, C: Children<'state>> Widget<'state> for SizedRect<C> {
-//     fn rect(&self, bounds: Size) -> Rect<'state> {
-//         Rect {
-//             size: self.size,
-//             children: self.children.children(self.size),
-//             fill: self.fill,
-//             radius: self.radius,
-//             on_click: None,
-//             on_key_pressed: None,
-//         }
-//     }
-// }
-
-// pub trait Children<'state> {
-//     fn children(&self, bounds: Size) -> Vec<Child<'state>>;
-// }
-
-// impl<'state> Children<'state> for () {
-//     fn children(&self, bounds: Size) -> Vec<Child<'state>> {
-//         vec![]
-//     }
-// }
-
-// impl<'state, C1: Widget<'state>> Children<'state> for (C1,) {
-//     fn children(&self, bounds: Size) -> Vec<Child<'state>> {
-//         vec![Child {
-//             rect: self.0.rect(bounds),
-//             position: Offset { x: 0, y: 0 },
-//         }]
-//     }
-// }
-
-// pub struct FillingRect<C> {
-//     pub fill: Fill,
-//     pub children: C,
-// }
-
-// impl<'state, C: Children<'state>> Widget<'state> for FillingRect<C> {
-//     fn rect(&self, bounds: Size) -> Rect<'state> {
-//         Rect {
-//             size: bounds,
-//             children: self.children.children(bounds),
-//             fill: self.fill,
-//             radius: 0.0,
-//             on_click: None,
-//             on_key_pressed: None,
-//         }
-//     }
-// }
-
-// pub struct OnKey<'state, W> {
-//     pub on_key: KeyHandler<'state>,
-//     pub widget: W,
-// }
-
-// impl<'state, W: Widget<'state>> Widget<'state> for OnKey<'state, W> {
-//     fn rect(&self, bounds: Size) -> Rect<'state> {
-//         let mut rect = self.widget.rect(bounds);
-//         rect.on_key_pressed = Some(self.on_key);
-//         rect
-//     }
-// }
-
 pub struct Child {
     pub position: Offset,
     pub rect: Rect,
@@ -215,40 +133,6 @@ impl Child {
     }
 }
 
-// pub struct ClickHandler {
-//     fun: Box<dyn Fn()>,
-// }
-
-// impl ClickHandler {
-//     pub fn new<T>(state: &'state T, mutate: fn(&mut T)) -> Self {
-//         Self {
-//             _borrowed: PhantomData,
-//             fun: unsafe { mem::transmute(mutate) },
-//             ptr: state as *const _ as *const u8,
-//         }
-//     }
-// }
-
-// #[derive(Clone, Copy)]
-// pub struct KeyHandler {
-//     ptr: *const u8,
-//     fun: fn(*const u8, key: &keyboard::Key<SmolStr>, modifiers: ModifiersState),
-//     _borrowed: PhantomData<&'state ()>,
-// }
-
-// impl KeyHandler {
-//     pub fn new<T>(
-//         state: &'state T,
-//         mutate: fn(&mut T, &keyboard::Key<SmolStr>, ModifiersState),
-//     ) -> Self {
-//         Self {
-//             _borrowed: PhantomData,
-//             fun: unsafe { mem::transmute(mutate) },
-//             ptr: state as *const _ as *const u8,
-//         }
-//     }
-// }
-
 enum UserEvent {
     RunHandler {
         handler_id: u64,
@@ -266,13 +150,6 @@ pub struct AsyncHandler<T> {
 }
 
 impl<T: Send + 'static> AsyncHandler<T> {
-    // fn new(fun: impl Fn(T) + 'static) -> Self {
-    //     Self {
-    //         fun: ManuallyDrop::new(Box::new(fun)),
-    //         proxy: EventLoopProxy::new(),
-    //     }
-    // }
-
     pub fn run(&self, value: T) {
         let _ = self.proxy.send_event(UserEvent::RunHandler {
             handler_id: self.handler_id,
@@ -338,6 +215,11 @@ impl Rect {
         self
     }
 
+    pub fn fill(mut self, fill: Fill) -> Self {
+        self.fill = fill;
+        self
+    }
+
     pub fn rounded(mut self, radius: f32) -> Self {
         self.radius = radius;
         self
@@ -350,6 +232,11 @@ impl Rect {
 
     pub fn children(mut self, children: Vec<Child>) -> Self {
         self.children = children;
+        self
+    }
+
+    pub fn size(mut self, size: Size) -> Self {
+        self.size = size;
         self
     }
 
@@ -506,7 +393,6 @@ fn draw_at(canvas: &mut Canvas, rect: &Rect, offset: Offset, view: softbuffer::R
         size,
         children,
         fill,
-        on_click,
         radius,
         ..
     } = &*rect;
@@ -602,37 +488,13 @@ fn draw(canvas: &mut Canvas, rect: &Rect, view: softbuffer::Rect) {
     draw_at(canvas, rect, Offset { x: 0, y: 0 }, view);
 }
 
-// pub struct Shared<T> {
-//     inner: Rc<RefCell<T>>,
-// }
+pub trait View<T> {
+    fn get(state: &T) -> impl Widget + '_;
+}
 
-// impl<T> Clone for Shared<T> {
-//     fn clone(&self) -> Self {
-//         Self {
-//             inner: self.inner.clone(),
-//         }
-//     }
-// }
-
-// pub struct Task<T, R> {
-//     shared: Shared<T>,
-//     on_done: Box<dyn FnOnce(&mut T, R) + 'static>,
-//     proxy: EventLoopProxy<T>,
-// }
-
-// unsafe impl<T: Send> Send for Task<T> {}
-
-// impl<T> Task<T> {
-//     pub fn done(self, value: T) {}
-// }
-
-// impl<T> Shared<T> {
-//     pub fn after_task<R>(self, done: impl FnOnce(R) + 'static) {}
-// }
-
-struct App<T> {
+struct App<T, V> {
     surface: Option<Surface<Rc<Window>, Rc<Window>>>,
-    create_fragment: fn(&T) -> Rect,
+    view: V,
     fragment: Option<Rect>,
     state: Box<T>,
     cursor: Offset,
@@ -642,13 +504,13 @@ struct App<T> {
     framerate_count: u64,
 }
 
-impl<T: 'static> App<T> {
-    pub fn new(init_state: T, create_fragment: fn(&T) -> Rect) -> Self {
+impl<T: 'static, V: View<T>> App<T, V> {
+    pub fn new(init_state: T, view: V) -> Self {
         let state = Box::new(init_state);
 
-        Self {
+        App {
             state,
-            create_fragment,
+            view,
             fragment: None,
             surface: None,
             modifiers: ModifiersState::empty(),
@@ -663,16 +525,15 @@ impl<T: 'static> App<T> {
     }
 
     fn create_fragment(&mut self, bounds: Size) -> (Option<Rect>, &Rect) {
-        let mut fragment = (self.create_fragment)(&self.state);
-
-        fragment.do_layout.unwrap_or(default_layout)(&mut fragment, bounds);
+        let root = V::get(&self.state);
+        let fragment = root.render(bounds);
 
         let old = self.fragment.replace(fragment);
         (old, self.fragment.as_mut().unwrap())
     }
 }
 
-impl<T: 'static> winit::application::ApplicationHandler<UserEvent> for App<T> {
+impl<T: 'static, V: View<T>> winit::application::ApplicationHandler<UserEvent> for App<T, V> {
     fn resumed(&mut self, event_loop: &winit::event_loop::ActiveEventLoop) {
         let window = Rc::new(
             event_loop
@@ -695,6 +556,7 @@ impl<T: 'static> winit::application::ApplicationHandler<UserEvent> for App<T> {
                 }
             }
         });
+        self.surface.as_ref().unwrap().window().request_redraw();
     }
 
     fn window_event(
@@ -713,7 +575,6 @@ impl<T: 'static> winit::application::ApplicationHandler<UserEvent> for App<T> {
                 });
 
                 let mut regions = old.map(|old| diff(&old, rect, Offset { x: 0, y: 0 }));
-                // dbg!(&regions);
 
                 let surface = self.surface.as_mut().unwrap();
                 if size.width != self.size.width as u32 || size.height != self.size.height as u32 {
@@ -776,13 +637,10 @@ impl<T: 'static> winit::application::ApplicationHandler<UserEvent> for App<T> {
             }
             WindowEvent::KeyboardInput { event, .. } => {
                 if event.state.is_pressed() {
-                    if self
-                        .fragment
-                        .as_ref()
-                        .unwrap()
-                        .key_press(&event.logical_key, self.modifiers)
-                    {
-                        self.surface.as_ref().unwrap().window().request_redraw();
+                    if let Some(fragment) = self.fragment.as_ref() {
+                        if fragment.key_press(&event.logical_key, self.modifiers) {
+                            self.surface.as_ref().unwrap().window().request_redraw();
+                        }
                     }
                 }
             }
@@ -803,12 +661,11 @@ thread_local! {
     static CURRENT_LOOP: RefCell<Option<EventLoopProxy<UserEvent>>> = RefCell::new(None);
 }
 
-pub fn run<T: 'static>(init_state: T, create_root: fn(&T) -> Rect) {
+pub fn run<'s, T: 'static, V: View<T>>(init_state: impl FnOnce() -> T, view: V) {
     let event_loop = EventLoop::<UserEvent>::with_user_event().build().unwrap();
     CURRENT_LOOP.replace(Some(event_loop.create_proxy()));
-    event_loop
-        .run_app(&mut App::new(init_state, create_root))
-        .unwrap();
+    let mut app = App::new(init_state(), view);
+    event_loop.run_app(&mut app).unwrap();
 }
 
 pub fn async_handler<T: 'static>(handler: impl Fn(T) + 'static) -> AsyncHandler<T> {
@@ -900,7 +757,7 @@ impl TextRenderer {
     }
 
     pub fn get_glyphs(&mut self, text: &str) -> TextLine {
-        let size = 60.0;
+        let size = 30.0;
         let font = swash::FontRef::from_index(include_bytes!("../ARIAL.TTF"), 0).unwrap();
 
         let mut shaper = self.shape_context.builder(font).size(size).build();
@@ -985,11 +842,24 @@ impl TextRenderer {
     }
 }
 
+struct TextCursor {
+    position: usize,
+    cursor: Rect,
+}
+
+pub fn text_with_cursor(text: &str, cursor: Cursor) -> Rect {
+    text_base(text, Some(cursor))
+}
+
 pub fn text(text: &str) -> Rect {
+    text_base(text, None)
+}
+
+pub fn text_base(text: &str, cursor: Option<Cursor>) -> Rect {
     let TextLine { glyphs, x_height } =
         TEXT_RENDERER.with_borrow_mut(|text_renderer| text_renderer.get_glyphs(text));
 
-    let height = 80.0;
+    let height = 40.0;
 
     let right = glyphs
         .iter()
@@ -1064,15 +934,11 @@ pub fn rows(children: Vec<Rect>) -> Rect {
 }
 
 pub fn default_layout(rect: &mut Rect, bounds: Size) {
-    rect.size.height = bounds.height.max(rect.size.height);
-    rect.size.width = bounds.width.max(rect.size.width);
+    rect.size.height = bounds.height.min(rect.size.height);
+    rect.size.width = bounds.width.min(rect.size.width);
 
     for child in &mut rect.children {
-        if let Some(do_layout) = child.rect.do_layout {
-            do_layout(&mut child.rect, bounds);
-        } else {
-            default_layout(&mut child.rect, bounds);
-        }
+        child.rect.do_layout.unwrap_or(default_layout)(&mut child.rect, rect.size);
     }
 }
 
@@ -1080,15 +946,42 @@ pub fn center(rect: &mut Rect, bounds: Size) {
     rect.size = bounds;
 
     for child in &mut rect.children {
-        if let Some(do_layout) = child.rect.do_layout {
-            do_layout(&mut child.rect, bounds);
-        }
+        child.rect.do_layout.unwrap_or(default_layout)(&mut child.rect, bounds);
 
         child.position = Offset {
             x: (rect.size.width - child.rect.size.width) / 2,
             y: (rect.size.height - child.rect.size.height) / 2,
         };
     }
+}
+
+pub fn pad(rect: Rect, padding: usize) -> Rect {
+    fn pad_layout(rect: &mut Rect, bounds: Size) {
+        let child_bounds = Size {
+            width: bounds.width.saturating_sub(2 * rect.size.width),
+            height: bounds.height.saturating_sub(2 * rect.size.height),
+        };
+
+        rect.size = bounds;
+
+        for child in &mut rect.children {
+            child.rect.do_layout.unwrap_or(default_layout)(&mut child.rect, child_bounds);
+        }
+    }
+
+    Rect::new()
+        .size(Size {
+            width: padding,
+            height: padding,
+        })
+        .children(vec![Child {
+            rect,
+            position: Offset {
+                x: padding,
+                y: padding,
+            },
+        }])
+        .layout(pad_layout)
 }
 
 pub fn on_key(fun: impl Fn(&keyboard::Key<SmolStr>, ModifiersState) + 'static) -> KeyHandler {

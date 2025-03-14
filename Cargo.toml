@@ -4,6 +4,8 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+ignore = "0.4.23"
+nucleo = "0.5.0"
 softbuffer = "0.4.6"
 swash = "0.2.0"
 winit = "0.30.9"
