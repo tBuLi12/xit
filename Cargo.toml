@@ -7,3 +7,5 @@ edition = "2021"
 
 [dependencies]
 caarr = { path = "../caarr" }
+ignore = "0.4.23"
+nucleo = "0.5.0"
