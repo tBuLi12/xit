@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use caarr::Rect;
 
-use crate::{EditorStatus, BASE_FONT};
+use crate::{editor::EditorStatus, BASE_FONT};
 
 pub const SIDEBAR_WIDTH: u32 = 150;
 pub const ITEM_HEIGHT: u32 = 40;
