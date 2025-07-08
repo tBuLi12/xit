@@ -2127,6 +2127,7 @@ dependencies = [
  "caarr",
  "ignore",
  "nucleo",
+ "unicode-segmentation",
 ]
 
 [[package]]

@@ -9,3 +9,4 @@ edition = "2021"
 caarr = { path = "../caarr" }
 ignore = "0.4.23"
 nucleo = "0.5.0"
+unicode-segmentation = "1.12.0"
