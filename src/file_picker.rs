@@ -30,7 +30,7 @@ impl FilePicker {
 
         let nucleo = Nucleo::new(
             nucleo::Config::DEFAULT,
-            Arc::new(move || channel.send_event(Event::ResultsChanged)),
+            Arc::new(move || channel.send_event(Event::FilePickerResultsChanged)),
             None,
             1,
         );

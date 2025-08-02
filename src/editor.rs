@@ -1,15 +1,18 @@
 use std::{
-    collections::BTreeMap,
+    collections::HashMap,
     fs::File,
     io::{BufWriter, Write},
     path::Path,
+    process,
     time::Instant,
 };
 
 use caarr::{Key, ModifiersState, NamedKey, Rect, TextLine};
 use unicode_segmentation::GraphemeCursor;
 
-use crate::{sidebar::SIDEBAR_WIDTH, BASE_FONT, CURSOR_WIDTH, LINE_HEIGHT};
+use crate::{sidebar::SIDEBAR_WIDTH, BASE_FONT, LINE_HEIGHT};
+
+const CURSOR_WIDTH: u32 = 2;
 
 struct Cursor {
     line: u32,
@@ -175,7 +178,7 @@ impl Editor {
     ) -> Option<EditorEvent> {
         match self.mode {
             EditorMode::Control => match key {
-                Key::Named(NamedKey::Control) => {
+                Key::Character("s") if modifiers.contains(ModifiersState::CONTROL) => {
                     let mut writer =
                         BufWriter::new(File::options().write(true).open(self_path).unwrap());
                     for line in &self.lines {
@@ -187,10 +190,134 @@ impl Editor {
                 }
                 Key::Character("i") => {
                     self.mode = EditorMode::Edit;
+                    if let Some(anchor) = self.selection_anchor {
+                        let cursor_position = self.cursor.text_position();
+                        if cursor_position > anchor {
+                            self.cursor.byte = anchor.byte;
+                            self.cursor.line = anchor.line;
+                            self.selection_anchor = Some(cursor_position);
+                            self.handle_cursor_update();
+                        }
+                    }
+                }
+                Key::Character("a") => {
+                    self.mode = EditorMode::Edit;
+                    if let Some(anchor) = self.selection_anchor {
+                        let cursor_position = self.cursor.text_position();
+                        if cursor_position < anchor {
+                            self.cursor.byte = anchor.byte;
+                            self.cursor.line = anchor.line;
+                            self.selection_anchor = Some(cursor_position);
+                            self.handle_cursor_update();
+                        }
+                    }
+                }
+                Key::Character("I") => {
+                    self.mode = EditorMode::Edit;
+                    if self.cursor.byte != 0 {
+                        self.cursor.byte = 0;
+                        self.handle_cursor_update();
+                    }
+                    self.drop_selection();
+                }
+                Key::Character("A") => {
+                    self.mode = EditorMode::Edit;
+                    let line_end = self.current_line_end();
+                    if self.cursor.byte != line_end {
+                        self.cursor.byte = line_end;
+                        self.handle_cursor_update();
+                    }
+                    self.drop_selection();
+                }
+                Key::Character("o") => {
+                    self.mode = EditorMode::Edit;
+                    let line_end = self.current_line_end();
+                    let line = self.cursor.line;
+                    let position = TextPosition {
+                        line,
+                        byte: line_end,
+                    };
+                    self.drop_selection();
+                    self.apply_edit(Edit {
+                        start: position,
+                        end: position,
+                        text: "\n",
+                    });
+                    self.cursor.byte = 0;
+                    self.cursor.line = line + 1;
+                    self.handle_cursor_update();
+                    return Some(EditorEvent::SetStatus(EditorStatus::Unsaved));
+                }
+                Key::Character("O") => {
+                    self.mode = EditorMode::Edit;
+                    let line = self.cursor.line;
+                    let position = TextPosition { line, byte: 0 };
+                    self.drop_selection();
+                    self.apply_edit(Edit {
+                        start: position,
+                        end: position,
+                        text: "\n",
+                    });
+                    self.cursor.byte = 0;
+                    self.cursor.line = line;
+                    self.handle_cursor_update();
+                    return Some(EditorEvent::SetStatus(EditorStatus::Unsaved));
+                }
+                Key::Character("w") => {
+                    let line_end = self.move_to_next_line_if_at_end()?;
+                    let line = &mut self.lines[self.cursor.line as usize];
+                    let mut seen_whitespace = false;
+                    let mut dst_idx = None;
+                    for (idx, char) in line[self.cursor.byte as usize..].char_indices() {
+                        if char.is_whitespace() {
+                            seen_whitespace = true;
+                        } else if seen_whitespace {
+                            dst_idx = Some(idx as u32 + self.cursor.byte);
+                            break;
+                        }
+                    }
+                    self.cursor.byte = dst_idx.unwrap_or(line_end);
+                    self.handle_cursor_update();
+                }
+                Key::Character("e") => {
+                    let line_end = self.move_to_next_line_if_at_end()?;
+                    let line = &mut self.lines[self.cursor.line as usize];
+                    let mut seen_letters = false;
+                    let mut dst_idx = None;
+                    for (idx, char) in line[self.cursor.byte as usize..].char_indices() {
+                        if !char.is_whitespace() {
+                            seen_letters = true;
+                        } else if seen_letters {
+                            dst_idx = Some(idx as u32 + self.cursor.byte);
+                            break;
+                        }
+                    }
+                    self.cursor.byte = dst_idx.unwrap_or(line_end);
+                    self.handle_cursor_update();
+                }
+                Key::Character("b") => {
+                    self.move_to_prev_line_if_at_start()?;
+                    let line = &mut self.lines[self.cursor.line as usize];
+                    let mut dst_idx = None;
+                    for (idx, char) in line[..self.cursor.byte as usize].char_indices().rev() {
+                        if !char.is_whitespace() {
+                            dst_idx = Some(idx as u32);
+                        } else if dst_idx.is_some() {
+                            break;
+                        }
+                    }
+                    self.cursor.byte = dst_idx.unwrap_or(0);
+                    self.handle_cursor_update();
                 }
                 Key::Character("q") => {
                     return Some(EditorEvent::Close);
                 }
+                Key::Character("Q") => process::exit(0),
+                Key::Character("j") => self.down(modifiers),
+                Key::Character("k") => self.up(modifiers),
+                Key::Character("h") => self.left(modifiers),
+                Key::Character("l") => self.right(modifiers),
+                Key::Character("d") => return self.del(modifiers),
                 _ => return Some(EditorEvent::KeyUnhandled),
             },
             EditorMode::Edit => match key {
@@ -219,20 +346,13 @@ impl Editor {
                     return Some(EditorEvent::SetStatus(EditorStatus::Unsaved));
                 }
                 Key::Named(NamedKey::Backspace) => {
+                    if self.try_delete_selection() {
+                        return Some(EditorEvent::SetStatus(EditorStatus::Unsaved));
+                    }
+
                     let line = &mut self.lines[self.cursor.line as usize];
                     let mut graphemes =
                         GraphemeCursor::new(self.cursor.byte as usize, line.len(), true);
-
-                    if self.selection_anchor.is_some() {
-                        let (start, end) = self.get_selection_bounds();
-                        self.selection_anchor = None;
-                        self.apply_edit(Edit {
-                            start,
-                            end,
-                            text: "",
-                        });
-                        return Some(EditorEvent::SetStatus(EditorStatus::Unsaved));
-                    }
 
                     if let Some(prev_idx) = graphemes.prev_boundary(&line, 0).unwrap() {
                         self.apply_edit(Edit {
@@ -270,64 +390,10 @@ impl Editor {
                     self.insert_text("\n");
                     return Some(EditorEvent::SetStatus(EditorStatus::Unsaved));
                 }
-                Key::Named(NamedKey::ArrowUp) => {
-                    if let Some(selection_changed) = self.up(modifiers) {
-                        self.handle_cursor_update();
-                        if selection_changed {
-                            self.update_selection_rect_positions();
-                        }
-                    }
-                }
-                Key::Named(NamedKey::ArrowDown) => {
-                    if let Some(selection_changed) = self.down(modifiers) {
-                        self.handle_cursor_update();
-                        if selection_changed {
-                            self.update_selection_rect_positions();
-                        }
-                    }
-                }
-                Key::Named(NamedKey::ArrowLeft) => {
-                    let line = &mut self.lines[self.cursor.line as usize];
-                    let mut graphemes =
-                        GraphemeCursor::new(self.cursor.byte as usize, line.len(), true);
-
-                    if let Some(prev_idx) = graphemes.prev_boundary(&line, 0).unwrap() {
-                        let selection_changed = self.handle_selection(modifiers);
-                        self.cursor.byte = prev_idx as u32;
-                        self.cursor.ephemeral_byte = self.cursor.byte;
-                        self.handle_cursor_update();
-                        if selection_changed {
-                            self.update_selection_rect_positions();
-                        }
-                    } else if let Some(selection_changed) = self.up(modifiers) {
-                        self.cursor.byte = self.lines[self.cursor.line as usize].len() as u32;
-                        self.handle_cursor_update();
-                        if selection_changed {
-                            self.update_selection_rect_positions();
-                        }
-                    }
-                }
-                Key::Named(NamedKey::ArrowRight) => {
-                    let line = &mut self.lines[self.cursor.line as usize];
-                    let mut graphemes =
-                        GraphemeCursor::new(self.cursor.byte as usize, line.len(), true);
-
-                    if let Some(next_idx) = graphemes.next_boundary(&line, 0).unwrap() {
-                        let selection_changed = self.handle_selection(modifiers);
-                        self.cursor.byte = next_idx as u32;
-                        self.cursor.ephemeral_byte = self.cursor.byte;
-                        self.handle_cursor_update();
-                        if selection_changed {
-                            self.update_selection_rect_positions();
-                        }
-                    } else if let Some(selection_changed) = self.down(modifiers) {
-                        self.cursor.byte = 0;
-                        self.handle_cursor_update();
-                        if selection_changed {
-                            self.update_selection_rect_positions();
-                        }
-                    }
-                }
+                Key::Named(NamedKey::ArrowDown) => self.down(modifiers),
+                Key::Named(NamedKey::ArrowUp) => self.up(modifiers),
+                Key::Named(NamedKey::ArrowLeft) => self.left(modifiers),
+                Key::Named(NamedKey::ArrowRight) => self.right(modifiers),
                 _ => return Some(EditorEvent::KeyUnhandled),
             },
         }
@@ -437,7 +503,153 @@ impl Editor {
         }
     }
 
-    fn down(&mut self, modifiers: ModifiersState) -> Option<bool> {
+    fn try_delete_selection(&mut self) -> bool {
+        if self.selection_anchor.is_some() {
+            let (start, end) = self.get_selection_bounds();
+            self.selection_anchor = None;
+            self.apply_edit(Edit {
+                start,
+                end,
+                text: "",
+            });
+            true
+        } else {
+            false
+        }
+    }
+
+    fn drop_selection(&mut self) {
+        if self.selection_anchor.is_some() {
+            self.selection_anchor = None;
+            self.update_selection_rect_positions();
+        }
+    }
+
+    fn current_line_end(&self) -> u32 {
+        self.lines[self.cursor.line as usize].len() as u32
+    }
+
+    fn move_to_prev_line_if_at_start(&mut self) -> Option<()> {
+        if self.cursor.byte == 0 {
+            self.cursor.line = self.cursor.line.checked_sub(1)?;
+            self.cursor.byte = self.current_line_end();
+        }
+
+        Some(())
+    }
+
+    fn move_to_next_line_if_at_end(&mut self) -> Option<u32> {
+        let mut line_end = self.current_line_end();
+        if self.cursor.byte == line_end {
+            if self.cursor.line == self.lines.len() as u32 - 1 {
+                return None;
+            }
+
+            self.cursor.line += 1;
+            self.cursor.byte = 0;
+            line_end = self.current_line_end();
+        }
+
+        Some(line_end)
+    }
+
+    fn del(&mut self, modifiers: ModifiersState) -> Option<EditorEvent> {
+        if self.try_delete_selection() {
+            return Some(EditorEvent::SetStatus(EditorStatus::Unsaved));
+        }
+
+        let line = &mut self.lines[self.cursor.line as usize];
+        let mut graphemes = GraphemeCursor::new(self.cursor.byte as usize, line.len(), true);
+
+        if let Some(next_idx) = graphemes.next_boundary(&line, 0).unwrap() {
+            self.apply_edit(Edit {
+                start: self.cursor.text_position(),
+                end: TextPosition {
+                    line: self.cursor.line,
+                    byte: next_idx as u32,
+                },
+                text: "",
+            });
+            return Some(EditorEvent::SetStatus(EditorStatus::Unsaved));
+        }
+
+        let next_line = self.cursor.line + 1;
+        if next_line < self.lines.len() as u32 {
+            self.apply_edit(Edit {
+                start: self.cursor.text_position(),
+                end: TextPosition {
+                    line: next_line,
+                    byte: 0,
+                },
+                text: "",
+            });
+            return Some(EditorEvent::SetStatus(EditorStatus::Unsaved));
+        }
+
+        None
+    }
+
+    fn up(&mut self, modifiers: ModifiersState) {
+        if let Some(selection_changed) = self.try_up(modifiers) {
+            self.handle_cursor_update();
+            if selection_changed {
+                self.update_selection_rect_positions();
+            }
+        }
+    }
+
+    fn down(&mut self, modifiers: ModifiersState) {
+        if let Some(selection_changed) = self.try_down(modifiers) {
+            self.handle_cursor_update();
+            if selection_changed {
+                self.update_selection_rect_positions();
+            }
+        }
+    }
+
+    fn left(&mut self, modifiers: ModifiersState) {
+        let line = &mut self.lines[self.cursor.line as usize];
+        let mut graphemes = GraphemeCursor::new(self.cursor.byte as usize, line.len(), true);
+
+        if let Some(prev_idx) = graphemes.prev_boundary(&line, 0).unwrap() {
+            let selection_changed = self.handle_selection(modifiers);
+            self.cursor.byte = prev_idx as u32;
+            self.cursor.ephemeral_byte = self.cursor.byte;
+            self.handle_cursor_update();
+            if selection_changed {
+                self.update_selection_rect_positions();
+            }
+        } else if let Some(selection_changed) = self.try_up(modifiers) {
+            self.cursor.byte = self.lines[self.cursor.line as usize].len() as u32;
+            self.handle_cursor_update();
+            if selection_changed {
+                self.update_selection_rect_positions();
+            }
+        }
+    }
+
+    fn right(&mut self, modifiers: ModifiersState) {
+        let line = &mut self.lines[self.cursor.line as usize];
+        let mut graphemes = GraphemeCursor::new(self.cursor.byte as usize, line.len(), true);
+
+        if let Some(next_idx) = graphemes.next_boundary(&line, 0).unwrap() {
+            let selection_changed = self.handle_selection(modifiers);
+            self.cursor.byte = next_idx as u32;
+            self.cursor.ephemeral_byte = self.cursor.byte;
+            self.handle_cursor_update();
+            if selection_changed {
+                self.update_selection_rect_positions();
+            }
+        } else if let Some(selection_changed) = self.try_down(modifiers) {
+            self.cursor.byte = 0;
+            self.handle_cursor_update();
+            if selection_changed {
+                self.update_selection_rect_positions();
+            }
+        }
+    }
+
+    fn try_down(&mut self, modifiers: ModifiersState) -> Option<bool> {
         if self.cursor.line < self.lines.len() as u32 - 1 {
             let selection_changed = self.handle_selection(modifiers);
             self.cursor.line += 1;
@@ -450,7 +662,7 @@ impl Editor {
         }
     }
 
-    fn up(&mut self, modifiers: ModifiersState) -> Option<bool> {
+    fn try_up(&mut self, modifiers: ModifiersState) -> Option<bool> {
         if self.cursor.line > 0 {
             let selection_changed = self.handle_selection(modifiers);
             self.cursor.line -= 1;
@@ -549,7 +761,7 @@ impl Editor {
     }
 
     fn render_lines(&mut self) {
-        let mut current_lines: BTreeMap<_, _> = self
+        let mut current_lines: HashMap<_, _> = self
             .visible_lines
             .drain(..)
             .map(|line| (line.index, line))

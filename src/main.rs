@@ -31,10 +31,9 @@ struct App {
 }
 
 const LINE_HEIGHT: u32 = 40;
-const CURSOR_WIDTH: u32 = 2;
 
 enum Event {
-    ResultsChanged,
+    FilePickerResultsChanged,
 }
 
 impl caarr::App for App {
@@ -55,10 +54,7 @@ impl caarr::App for App {
         if let Some(file_picker) = self.file_picker.as_mut() {
             if let Some(path) = file_picker.handle_key_event(key, modifiers) {
                 self.file_picker = None;
-
-                let path = path.canonicalize().unwrap();
-
-                self.open_editor(path);
+                self.open_editor(path.canonicalize().unwrap());
             }
             return;
         }
@@ -121,7 +117,7 @@ impl caarr::App for App {
 
     fn on_event(&mut self, event: Self::Event) {
         match event {
-            Event::ResultsChanged => {
+            Event::FilePickerResultsChanged => {
                 if let Some(picker) = self.file_picker.as_mut() {
                     picker.update_results();
                 }
@@ -132,23 +128,18 @@ impl caarr::App for App {
 
 impl App {
     fn open_editor(&mut self, path: PathBuf) {
-        eprintln!("opening editor {:?}", path);
         if let Some(editor) = self.editors.get_mut(&path) {
             if let Some(current_path) = &self.focused_editor {
                 if current_path == &path {
-                    eprintln!("no focus, already selected");
                     return;
                 }
             }
-
-            eprintln!("just focus");
 
             editor.show(self.root.as_ref().unwrap());
             self.set_focused_editor(path);
             return;
         }
 
-        eprintln!("actually new");
         let new_editor = Editor::new(
             self.root.as_ref().unwrap().clone(),
             BufReader::new(File::open(&path).unwrap())
