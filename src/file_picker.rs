@@ -1,6 +1,6 @@
 use std::{path::PathBuf, sync::Arc, thread};
 
-use caarr::{EventChannel, Key, KeyEvent, ModifiersState, NamedKey, Rect, TextLine};
+use caarr::{text::TextLine, EventChannel, Key, KeyEvent, ModifiersState, NamedKey, Rect};
 use nucleo::{Nucleo, Utf32String};
 use unicode_segmentation::GraphemeCursor;
 

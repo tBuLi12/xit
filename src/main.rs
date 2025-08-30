@@ -1,12 +1,11 @@
 use std::{
     collections::HashMap,
-    fs::{self, File},
-    io::{BufRead, BufReader},
+    fs,
     path::PathBuf,
     sync::{mpsc, LazyLock},
 };
 
-use caarr::{App, EventChannel, Font, Key, KeyEvent, ModifiersState, NamedKey, Rect};
+use caarr::{text::Font, App, EventChannel, Key, KeyEvent, NamedKey, Rect};
 use lsp::start_server;
 use sidebar::{sidebar, SIDEBAR_WIDTH};
 
@@ -27,7 +26,12 @@ struct State {
     editors: HashMap<PathBuf, Editor>,
     focused_editor: Option<PathBuf>,
     file_picker: Option<FilePicker>,
-    server_tx: Option<mpsc::Sender<lsp::RequestEvent>>,
+    lsp_servers: HashMap<String, LspServer>,
+}
+
+struct LspServer {
+    exe_path: String,
+    request_sender: Option<mpsc::Sender<lsp::RequestEvent>>,
 }
 
 const LINE_HEIGHT: u32 = 40;
@@ -75,7 +79,8 @@ impl caarr::State for State {
         if let Some(file_picker) = app.state.file_picker.as_mut() {
             if let Some(path) = file_picker.handle_key_event(event) {
                 app.state.file_picker = None;
-                app.state.open_editor(path.canonicalize().unwrap());
+                app.state
+                    .open_editor(path.canonicalize().unwrap(), &app.channel);
             }
             return;
         }
@@ -103,8 +108,6 @@ impl caarr::State for State {
         match event.key {
             Key::Named(NamedKey::Tab) => {
                 if app.state.file_picker.is_none() {
-                    app.state.server_tx =
-                        Some(start_server("rust-analyzer".into(), app.channel.clone()));
                     app.state.file_picker = Some(FilePicker::new(app.channel.clone()));
                 }
             }
@@ -119,9 +122,33 @@ impl caarr::State for State {
                     picker.update_results();
                 }
             }
-            Event::Lsp(lsp::ResponseEvent::SemanticTokens { file, highlights }) => {
+            Event::Lsp(lsp::ResponseEvent::SemanticTokens {
+                file,
+                highlights,
+                version,
+                result_id,
+            }) => {
                 if let Some(editor) = app.state.editors.get_mut(&file) {
-                    editor.highlights = highlights;
+                    editor.apply_full_highlights(version, highlights, result_id);
+                }
+            }
+            Event::Lsp(lsp::ResponseEvent::SemanticTokensDelta {
+                file,
+                version,
+                highlights,
+                result_id,
+            }) => {
+                if let Some(editor) = app.state.editors.get_mut(&file) {
+                    editor.apply_highlights_delta(version, highlights, result_id);
+                }
+            }
+            Event::Lsp(lsp::ResponseEvent::Diagnostics {
+                diagnostics,
+                path,
+                version,
+            }) => {
+                if let Some(editor) = app.state.editors.get_mut(&path) {
+                    editor.set_diagnostics(diagnostics, version);
                 }
             }
         }
@@ -129,37 +156,29 @@ impl caarr::State for State {
 }
 
 impl State {
-    fn open_editor(&mut self, path: PathBuf) {
+    fn open_editor(&mut self, path: PathBuf, channel: &EventChannel<Event>) {
         if let Some(_) = self.editors.get_mut(&path) {
             self.set_focused_editor(path);
             return;
         }
 
+        let lsp_sender = path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .and_then(|ext| self.lsp_servers.get_mut(ext))
+            .map(|lsp| {
+                lsp.request_sender
+                    .get_or_insert_with(|| {
+                        start_server(PathBuf::from(&lsp.exe_path), channel.clone())
+                    })
+                    .clone()
+            });
+
         let text = fs::read_to_string(&path).unwrap();
 
-        let new_editor = Editor::new(text.lines().map(|line| line.to_string()));
+        let new_editor = Editor::new(text, path.clone(), lsp_sender);
 
         self.editors.insert(path.clone(), new_editor);
-
-        if path.extension() == Some("rs".as_ref()) {
-            eprintln!("sending semnatic tokens request to lsp thread");
-            self.server_tx
-                .as_ref()
-                .unwrap()
-                .send(lsp::RequestEvent::DidOpen {
-                    file: path.clone(),
-                    text,
-                });
-            self.server_tx
-                .as_ref()
-                .unwrap()
-                .send(lsp::RequestEvent::SemanticTokens { file: path.clone() });
-        } else {
-            eprintln!(
-                "not sending semnatic tokens request to lsp thread due to ending {}",
-                path.display()
-            );
-        }
 
         self.set_focused_editor(path);
     }
@@ -198,6 +217,12 @@ fn main() {
         editors: HashMap::new(),
         focused_editor: None,
         file_picker: None,
-        server_tx: None,
+        lsp_servers: HashMap::from([(
+            "rs".to_string(),
+            LspServer {
+                exe_path: "rust-analyzer".to_string(),
+                request_sender: None,
+            },
+        )]),
     });
 }

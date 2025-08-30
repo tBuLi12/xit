@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use caarr::{Rect, TextLine};
+use caarr::{text::TextLine, Rect};
 
 use crate::{editor::EditorStatus, BASE_FONT};
 

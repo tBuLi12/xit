@@ -1,5 +1,6 @@
 use std::{
     io::{self, BufRead, BufReader, BufWriter, Read, Write},
+    ops,
     path::{Component, Path, PathBuf, Prefix},
     process::{Command, Stdio},
     str::FromStr,
@@ -9,31 +10,69 @@ use std::{
 
 use caarr::EventChannel;
 use lsp_types::{
-    notification,
-    request::{self},
-    DidOpenTextDocumentParams, InitializeParams, InitializedParams, SemanticTokenType,
+    notification::{self, Notification, PublishDiagnostics},
+    request, CompletionContext, CompletionParams, CompletionResponse, CompletionTriggerKind,
+    DidChangeTextDocumentParams, DidOpenTextDocumentParams, InitializeParams, InitializedParams,
+    Position, PublishDiagnosticsParams, Range, SemanticToken, SemanticTokenType,
     SemanticTokensClientCapabilities, SemanticTokensClientCapabilitiesRequests,
-    SemanticTokensFullOptions, SemanticTokensParams, SemanticTokensResult,
-    SemanticTokensServerCapabilities, TextDocumentIdentifier, TextDocumentItem,
-    TextDocumentSyncClientCapabilities, TokenFormat,
+    SemanticTokensDeltaParams, SemanticTokensFullDeltaResult, SemanticTokensFullOptions,
+    SemanticTokensParams, SemanticTokensResult, SemanticTokensServerCapabilities,
+    TextDocumentContentChangeEvent, TextDocumentIdentifier, TextDocumentItem,
+    TextDocumentPositionParams, TextDocumentSyncClientCapabilities, TokenFormat,
+    VersionedTextDocumentIdentifier,
 };
 use serde::{Deserialize, Serialize};
+use serde_json::value::RawValue;
 
 use crate::{
-    editor::{TextPosition, TextRange},
+    editor::{Diagnostic, Edit, TextPosition, TextRange},
     Event,
 };
 
 pub enum ResponseEvent {
     SemanticTokens {
         file: PathBuf,
+        version: u32,
         highlights: Vec<Highlight>,
+        result_id: Option<String>,
+    },
+    SemanticTokensDelta {
+        file: PathBuf,
+        version: u32,
+        highlights: HighlightsDelta,
+        result_id: Option<String>,
+    },
+    Diagnostics {
+        version: u32,
+        path: PathBuf,
+        diagnostics: Vec<Diagnostic>,
     },
 }
 
 pub enum RequestEvent {
-    SemanticTokens { file: PathBuf },
-    DidOpen { file: PathBuf, text: String },
+    SemanticTokens {
+        file: PathBuf,
+        version: u32,
+    },
+    SemanticTokensDelta {
+        file: PathBuf,
+        version: u32,
+        previous_result_id: String,
+    },
+    DidOpen {
+        file: PathBuf,
+        text: String,
+        version: u32,
+    },
+    DidChange {
+        file: PathBuf,
+        edits: Vec<Edit<'static>>,
+        version: u32,
+    },
+    Completion {
+        file: PathBuf,
+        position: TextPosition,
+    },
 }
 
 #[derive(Serialize)]
@@ -45,12 +84,29 @@ struct Request<'r, Params> {
     params: Params,
 }
 
+// #[derive(Deserialize, Serialize)]
+// struct Response<'r, Result> {
+//     #[allow(dead_code)]
+//     jsonrpc: &'r str,
+//     id: Option<u64>,
+//     result: Result,
+// }
+
 #[derive(Deserialize)]
-struct Response<'r, Result> {
+struct LspMessage<'r> {
     #[allow(dead_code)]
     jsonrpc: &'r str,
     id: Option<u64>,
-    result: Result,
+    method: Option<&'r str>,
+    params: Option<&'r RawValue>,
+    result: Option<&'r RawValue>,
+}
+
+#[derive(Deserialize)]
+struct AnyResponse {
+    id: u64,
+    result_range: ops::Range<usize>,
+    whole_message: String,
 }
 
 pub fn start_server(
@@ -67,11 +123,11 @@ pub fn start_server(
             .spawn()
             .unwrap();
 
-        let mut reader = BufReader::new(server_process.stdout.take().unwrap());
+        let reader = start_reader(server_process.stdout.take().unwrap(), app_channel.clone());
         let mut writer = BufWriter::new(server_process.stdin.take().unwrap());
 
         let init_response =
-            send_request::<request::Initialize>(&mut writer, &mut reader, initialize()).unwrap();
+            send_request::<request::Initialize>(&mut writer, &reader, initialize()).unwrap();
 
         send_notification::<notification::Initialized>(&mut writer, InitializedParams {}).unwrap();
 
@@ -92,24 +148,61 @@ pub fn start_server(
 
         for request in request_rx {
             match request {
-                RequestEvent::DidOpen { file, text } => {
+                RequestEvent::DidOpen {
+                    file,
+                    text,
+                    version,
+                } => {
                     send_notification::<notification::DidOpenTextDocument>(
                         &mut writer,
                         DidOpenTextDocumentParams {
                             text_document: TextDocumentItem {
                                 uri: path_to_uri(&file),
                                 language_id: "rust".to_string(),
-                                version: 1,
+                                version: version as i32,
                                 text,
                             },
                         },
                     )
                     .unwrap();
                 }
-                RequestEvent::SemanticTokens { file } => {
+                RequestEvent::DidChange {
+                    file,
+                    edits,
+                    version,
+                } => {
+                    send_notification::<notification::DidChangeTextDocument>(
+                        &mut writer,
+                        DidChangeTextDocumentParams {
+                            content_changes: edits
+                                .into_iter()
+                                .map(|edit| TextDocumentContentChangeEvent {
+                                    range: Some(Range {
+                                        start: Position {
+                                            line: edit.start.line,
+                                            character: edit.start.byte,
+                                        },
+                                        end: Position {
+                                            line: edit.start.line,
+                                            character: edit.start.byte,
+                                        },
+                                    }),
+                                    range_length: None,
+                                    text: edit.text.to_string(),
+                                })
+                                .collect(),
+                            text_document: VersionedTextDocumentIdentifier {
+                                uri: path_to_uri(&file),
+                                version: version as i32,
+                            },
+                        },
+                    )
+                    .unwrap();
+                }
+                RequestEvent::SemanticTokens { file, version } => {
                     let response = send_request::<request::SemanticTokensFullRequest>(
                         &mut writer,
-                        &mut reader,
+                        &reader,
                         SemanticTokensParams {
                             partial_result_params: Default::default(),
                             work_done_progress_params: Default::default(),
@@ -124,37 +217,126 @@ pub fn start_server(
                         match response {
                             SemanticTokensResult::Tokens(tokens) => {
                                 if let Some(legend) = &tokens_legend {
-                                    let mut line = 0;
-                                    let mut byte = 0;
-                                    let highlights = tokens
-                                        .data
-                                        .into_iter()
-                                        .map(|token| {
-                                            line += token.delta_line;
-                                            if token.delta_line != 0 {
-                                                byte = 0;
-                                            }
-                                            byte += token.delta_start;
-                                            Highlight {
-                                                range: TextRange {
-                                                    start: TextPosition { line, byte },
-                                                    end: TextPosition {
-                                                        line,
-                                                        byte: byte + token.length,
-                                                    },
-                                                },
-                                                token_type: legend[token.token_type as usize],
-                                            }
-                                        })
-                                        .collect();
-
                                     app_channel.send_event(Event::Lsp(
-                                        ResponseEvent::SemanticTokens { file, highlights },
+                                        ResponseEvent::SemanticTokens {
+                                            file,
+                                            highlights: decode_semantic_tokens(
+                                                &tokens.data,
+                                                legend,
+                                            )
+                                            .collect(),
+                                            version,
+                                            result_id: tokens.result_id,
+                                        },
                                     ));
                                 }
                             }
                             SemanticTokensResult::Partial(_) => {}
                         }
+                    }
+                }
+                RequestEvent::SemanticTokensDelta {
+                    file,
+                    version,
+                    previous_result_id,
+                } => {
+                    if let Some(response) = send_request::<request::SemanticTokensFullDeltaRequest>(
+                        &mut writer,
+                        &reader,
+                        SemanticTokensDeltaParams {
+                            partial_result_params: Default::default(),
+                            work_done_progress_params: Default::default(),
+                            text_document: TextDocumentIdentifier {
+                                uri: path_to_uri(&file),
+                            },
+                            previous_result_id,
+                        },
+                    )
+                    .unwrap()
+                    {
+                        match response {
+                            SemanticTokensFullDeltaResult::Tokens(tokens) => {
+                                if let Some(legend) = &tokens_legend {
+                                    app_channel.send_event(Event::Lsp(
+                                        ResponseEvent::SemanticTokens {
+                                            file,
+                                            highlights: decode_semantic_tokens(
+                                                &tokens.data,
+                                                legend,
+                                            )
+                                            .collect(),
+                                            version,
+                                            result_id: tokens.result_id,
+                                        },
+                                    ));
+                                }
+                            }
+                            SemanticTokensFullDeltaResult::TokensDelta(tokens_delta) => {
+                                if let Some(legend) = &tokens_legend {
+                                    app_channel.send_event(Event::Lsp(
+                                        ResponseEvent::SemanticTokensDelta {
+                                            file,
+                                            version,
+                                            highlights: HighlightsDelta {
+                                                edits: tokens_delta
+                                                    .edits
+                                                    .into_iter()
+                                                    .map(|edit| {
+                                                        assert_eq!(edit.start % 5, 0);
+                                                        assert_eq!(edit.delete_count % 5, 0);
+                                                        HighlightsEdit {
+                                                            start: edit.start / 5,
+                                                            delete_count: edit.delete_count / 5,
+                                                            highligts: decode_semantic_tokens(
+                                                                edit.data.as_deref().unwrap_or(&[]),
+                                                                &legend,
+                                                            )
+                                                            .collect(),
+                                                        }
+                                                    })
+                                                    .collect(),
+                                            },
+                                            result_id: tokens_delta.result_id,
+                                        },
+                                    ));
+                                }
+                            }
+                            SemanticTokensFullDeltaResult::PartialTokensDelta { .. } => {}
+                        }
+                    }
+                }
+                RequestEvent::Completion { file, position } => {
+                    if let Some(response) = send_request::<request::Completion>(
+                        &mut writer,
+                        &reader,
+                        CompletionParams {
+                            partial_result_params: Default::default(),
+                            work_done_progress_params: Default::default(),
+                            context: Some(CompletionContext {
+                                trigger_kind: CompletionTriggerKind::INVOKED,
+                                trigger_character: None,
+                            }),
+                            text_document_position: TextDocumentPositionParams {
+                                position: Position {
+                                    line: position.line,
+                                    character: position.byte,
+                                },
+                                text_document: TextDocumentIdentifier {
+                                    uri: path_to_uri(&file),
+                                },
+                            },
+                        },
+                    )
+                    .unwrap()
+                    {
+                        let items = match response {
+                            CompletionResponse::Array(array) => array,
+                            CompletionResponse::List(list) => list.items,
+                        };
+
+                        // for item in items {
+                        //     item
+                        // }
                     }
                 }
             }
@@ -164,14 +346,198 @@ pub fn start_server(
     request_tx
 }
 
+fn start_reader(
+    reader: impl Read + Send + 'static,
+    app_channel: EventChannel<Event>,
+) -> mpsc::Receiver<AnyResponse> {
+    let mut reader = BufReader::new(reader);
+
+    let (tx, rx) = mpsc::channel();
+
+    thread::spawn(move || loop {
+        if let Some(body) = get_body(&mut reader) {
+            let message: LspMessage = match serde_json::from_str(&body) {
+                Ok(message) => message,
+                Err(e) => {
+                    eprintln!("{body}");
+                    panic!("{}", e);
+                }
+            };
+            if let Some(result) = message.result {
+                if let Some(id) = message.id {
+                    tx.send(AnyResponse {
+                        id,
+                        result_range: {
+                            let base = body.as_str().as_ptr() as usize;
+                            let start = result.get().as_ptr() as usize;
+                            let start_offset = start - base;
+                            start_offset..(start_offset + result.get().len())
+                        },
+                        whole_message: body,
+                    })
+                    .unwrap();
+                }
+            } else {
+                match message.method.unwrap() {
+                    notification::PublishDiagnostics::METHOD => {
+                        let body: PublishDiagnosticsParams =
+                            serde_json::from_str(message.params.unwrap().get()).unwrap();
+                        if let Some((path, version)) =
+                            body.uri.as_str().strip_prefix("file:///").zip(body.version)
+                        {
+                            match PathBuf::from(path).canonicalize() {
+                                Err(err) => eprintln!("oof {err} - {path}"),
+                                Ok(path) => {
+                                    eprintln!("sending diagnostics");
+                                    app_channel.send_event(Event::Lsp(
+                                        ResponseEvent::Diagnostics {
+                                            path,
+                                            version: version as u32,
+                                            diagnostics: body
+                                                .diagnostics
+                                                .into_iter()
+                                                .map(|diagnostic| Diagnostic {
+                                                    message: diagnostic.message,
+                                                    range: TextRange {
+                                                        start: TextPosition {
+                                                            byte: diagnostic.range.start.character,
+                                                            line: diagnostic.range.start.line,
+                                                        },
+                                                        end: TextPosition {
+                                                            byte: diagnostic.range.end.character,
+                                                            line: diagnostic.range.end.line,
+                                                        },
+                                                    },
+                                                })
+                                                .collect(),
+                                        },
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    });
+
+    rx
+}
+
+fn decode_semantic_tokens<'a>(
+    tokens: &'a [SemanticToken],
+    legend: &'a [&str],
+) -> impl ExactSizeIterator<Item = Highlight> + 'a {
+    let mut line = 0;
+    let mut byte = 0;
+
+    tokens.iter().map(move |token| {
+        line += token.delta_line;
+        if token.delta_line != 0 {
+            byte = 0;
+        }
+        byte += token.delta_start;
+
+        Highlight {
+            line,
+            start_byte: byte,
+            end_byte: byte + token.length,
+            color: match legend[token.token_type as usize] {
+                "type" => [0, 200, 0, 255],
+                "class" => [0, 200, 0, 255],
+                "enum" => [0, 0, 200, 255],
+                "interface" => [0, 200, 0, 255],
+                "struct" => [0, 200, 0, 255],
+                "typeParameter" => [0, 200, 0, 255],
+                "parameter" => [0, 0, 100, 255],
+                "variable" => [0, 0, 100, 255],
+                "property" => [0, 0, 100, 255],
+                "enumMember" => [0, 0, 0, 255],
+                "event" => [0, 0, 0, 255],
+                "function" => [100, 100, 0, 255],
+                "method" => [100, 100, 0, 255],
+                "macro" => [0, 0, 0, 255],
+                "keyword" => [0, 0, 0, 255],
+                "modifier" => [0, 0, 0, 255],
+                "comment" => [0, 0, 0, 255],
+                "string" => [0, 0, 0, 255],
+                "number" => [0, 0, 0, 255],
+                "regexp" => [0, 0, 0, 255],
+                "operator" => [0, 0, 0, 255],
+                _ => [0, 0, 0, 255],
+            },
+        }
+    })
+}
+
+#[derive(Debug)]
+pub struct HighlightsDelta {
+    edits: Vec<HighlightsEdit>,
+}
+
+#[derive(Debug)]
+struct HighlightsEdit {
+    start: u32,
+    delete_count: u32,
+    highligts: Vec<Highlight>,
+}
+
+impl HighlightsDelta {
+    pub fn apply_to(
+        &self,
+        highlights: &mut Vec<Highlight>,
+        mut on_highlight: impl FnMut(&Highlight),
+    ) {
+        for edit in &self.edits {
+            eprintln!(
+                "{:?} {:?} {:?} {:?}",
+                highlights.len(),
+                edit.start,
+                edit.delete_count,
+                edit.highligts.len()
+            );
+
+            let start = edit.start as usize;
+            let end = start + edit.delete_count as usize;
+
+            let (start_line, start_byte) = start
+                .checked_sub(1)
+                .map(|idx| {
+                    let highlight = &highlights[idx];
+                    (highlight.line, highlight.start_byte)
+                })
+                .unwrap_or((0, 0));
+
+            highlights.splice(
+                start..end,
+                edit.highligts.iter().map(|relative| {
+                    let start_byte = if relative.line == 0 { start_byte } else { 0 };
+                    let new_highlight = Highlight {
+                        line: relative.line + start_line,
+                        start_byte: relative.start_byte + start_byte,
+                        end_byte: relative.end_byte + start_byte,
+                        color: relative.color,
+                    };
+                    on_highlight(&new_highlight);
+                    new_highlight
+                }),
+            );
+        }
+    }
+}
+
+#[derive(Debug)]
 pub struct Highlight {
-    pub range: TextRange,
-    pub token_type: &'static str,
+    pub line: u32,
+    pub start_byte: u32,
+    pub end_byte: u32,
+    pub color: [u8; 4],
 }
 
 fn send_request<R: request::Request>(
     writer: &mut impl Write,
-    reader: &mut impl BufRead,
+    reader: &mpsc::Receiver<AnyResponse>,
     params: R::Params,
 ) -> io::Result<R::Result> {
     static COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -188,11 +554,11 @@ fn send_request<R: request::Request>(
     writer.write_all(request.as_bytes())?;
     writer.flush()?;
     loop {
-        let body = get_body(reader).unwrap();
-        eprintln!("{body}");
-        let response: Response<'_, R::Result> = serde_json::from_str(&body).unwrap();
-        if response.id == Some(id) {
-            return Ok(response.result);
+        let response = reader.recv().unwrap();
+        let result: R::Result =
+            serde_json::from_str(&response.whole_message[response.result_range]).unwrap();
+        if response.id == id {
+            return Ok(result);
         }
     }
 }

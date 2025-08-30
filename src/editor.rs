@@ -1,18 +1,22 @@
 use std::{
     borrow::Cow,
-    collections::HashMap,
     fs::File,
-    io::{BufWriter, Lines, Write},
-    iter, mem,
-    path::Path,
+    io::{BufWriter, Write},
+    iter,
+    path::{Path, PathBuf},
     process,
+    sync::mpsc,
+    thread,
     time::Instant,
 };
 
-use caarr::{Key, KeyEvent, ModifiersState, NamedKey, Rect, TextLine};
+use caarr::{text::TextLine, Key, KeyEvent, ModifiersState, NamedKey, Rect};
 use unicode_segmentation::GraphemeCursor;
 
-use crate::{lsp::Highlight, sidebar::SIDEBAR_WIDTH, BASE_FONT, LINE_HEIGHT};
+use crate::{
+    lsp::{self, Highlight, HighlightsDelta},
+    BASE_FONT, LINE_HEIGHT,
+};
 
 #[derive(Clone, Copy)]
 pub enum EditorStatus {
@@ -33,18 +37,21 @@ pub enum EditorEvent {
 pub struct Editor {
     mode: EditorMode,
     pub status: EditorStatus,
-    pub highlights: Vec<Highlight>,
     // top_px_offset: u32,
     // left_px_offset: u32,
     lines: Vec<String>,
+    line_colors: Vec<Vec<[u8; 4]>>,
     selections: Vec<TextRange>,
     edits_queue: Vec<Edit<'static>>,
+    lsp_sender: Option<mpsc::Sender<lsp::RequestEvent>>,
+    version: u32,
+    last_semantic_tokens_result_id: Option<String>,
+    last_highlights: Vec<Highlight>,
+    diagnostics: Vec<Diagnostic>,
 }
 
 impl Editor {
     pub fn render(&self, width: u32, height: u32) -> Rect {
-        // flush edits
-
         let main_box = Rect::new();
         main_box.set_size(width, height);
 
@@ -62,13 +69,70 @@ impl Editor {
             .div_ceil(LINE_HEIGHT)
             .min(self.lines.len() as u32);
 
-        self.lines[first_visible_line as usize..last_visible_line as usize]
+        let visible_range = first_visible_line as usize..last_visible_line as usize;
+        self.lines[visible_range.clone()]
             .iter()
+            .zip(self.line_colors[visible_range].iter())
             .enumerate()
-            .for_each(|(i, line)| {
+            .for_each(|(i, (line, colors))| {
                 let idx = first_visible_line + i as u32;
                 let mut text_line = TextLine::new();
-                text_line.set_text(*BASE_FONT, [(&**line, [0, 0, 0, 255])]);
+
+                let mut fragments = vec![];
+                {
+                    for (i, color) in colors.iter().enumerate() {
+                        fragments.push((&line[i..i + 1], *color));
+                    }
+
+                    // let mut highlights_i = 0;
+                    // let mut i = 0;
+
+                    // loop {
+                    //     if let Some(highlight) = highlights.get(highlights_i) {
+                    //         if highlight.byte_start == i {
+                    //             let color = match highlight.token_type {
+                    //                 "type" => [0, 200, 0, 255],
+                    //                 "class" => [0, 200, 0, 255],
+                    //                 "enum" => [0, 0, 200, 255],
+                    //                 "interface" => [0, 200, 0, 255],
+                    //                 "struct" => [0, 200, 0, 255],
+                    //                 "typeParameter" => [0, 200, 0, 255],
+                    //                 "parameter" => [0, 0, 100, 255],
+                    //                 "variable" => [0, 0, 100, 255],
+                    //                 "property" => [0, 0, 100, 255],
+                    //                 "enumMember" => [0, 0, 0, 255],
+                    //                 "event" => [0, 0, 0, 255],
+                    //                 "function" => [100, 100, 0, 255],
+                    //                 "method" => [100, 100, 0, 255],
+                    //                 "macro" => [0, 0, 0, 255],
+                    //                 "keyword" => [0, 0, 0, 255],
+                    //                 "modifier" => [0, 0, 0, 255],
+                    //                 "comment" => [0, 0, 0, 255],
+                    //                 "string" => [0, 0, 0, 255],
+                    //                 "number" => [0, 0, 0, 255],
+                    //                 "regexp" => [0, 0, 0, 255],
+                    //                 "operator" => [0, 0, 0, 255],
+                    //                 _ => [0, 0, 0, 255],
+                    //             };
+                    //             fragments
+                    //                 .push((&line[i as usize..highlight.byte_end as usize], color));
+                    //             i = highlight.byte_end;
+                    //             highlights_i += 1;
+                    //         } else {
+                    //             fragments.push((
+                    //                 &line[i as usize..highlight.byte_start as usize],
+                    //                 [0, 0, 0, 255],
+                    //             ));
+                    //             i = highlight.byte_start;
+                    //         }
+                    //     } else {
+                    //         fragments.push((&line[i as usize..], [0, 0, 0, 255]));
+                    //         break;
+                    //     }
+                    // }
+                }
+
+                text_line.set_text(*BASE_FONT, fragments);
                 let selection_rect = Rect::new();
                 selection_rect.set_bg_color([0, 0, 150, 100]);
 
@@ -96,6 +160,31 @@ impl Editor {
 
                 text_line.rect.append_child(selection_rect);
 
+                for diagnostic in &self.diagnostics {
+                    let range = diagnostic.range;
+                    if range.start.line <= idx && range.end.line >= idx {
+                        let start = if range.start.line == idx {
+                            range.start.byte.min(line.len() as u32)
+                        } else {
+                            0
+                        };
+                        let end = if range.end.line == idx {
+                            range.end.byte.min(line.len() as u32)
+                        } else {
+                            line.len() as u32
+                        };
+                        let nudge = if start == end { 2 } else { 0 };
+                        let start_offset =
+                            get_px_offset_in_line(&text_line, start).saturating_sub(nudge);
+                        let end_offset = get_px_offset_in_line(&text_line, end) + nudge;
+                        let diagnostic_rect = Rect::new();
+                        diagnostic_rect.set_pos(start_offset as i32, (LINE_HEIGHT / 2) as i32);
+                        diagnostic_rect.set_size(end_offset - start_offset, 4);
+                        diagnostic_rect.set_bg_color([255, 0, 0, 255]);
+                        text_line.rect.append_child(diagnostic_rect);
+                    }
+                }
+
                 text_line.rect.set_pos(30, (idx * LINE_HEIGHT) as i32);
                 lines_container.append_child(text_line.rect);
 
@@ -113,23 +202,101 @@ impl Editor {
         main_box
     }
 
-    pub fn new(lines: impl IntoIterator<Item = String>) -> Self {
-        let mut lines: Vec<_> = lines.into_iter().collect();
+    pub fn new(
+        mut text: String,
+        path: PathBuf,
+        lsp_sender: Option<mpsc::Sender<lsp::RequestEvent>>,
+    ) -> Self {
+        if text.is_empty() {
+            text.push('\n');
+        }
 
-        if lines.is_empty() {
-            lines.push(String::new());
+        let lines: Vec<_> = text.lines().map(|line| line.to_string()).collect();
+        let line_colors = lines
+            .iter()
+            .map(|line| vec![[0, 0, 0, 255]; line.len()])
+            .collect();
+
+        if let Some(lsp) = &lsp_sender {
+            lsp.send(lsp::RequestEvent::DidOpen {
+                file: path.clone(),
+                text,
+                version: 0,
+            });
+            lsp.send(lsp::RequestEvent::SemanticTokens {
+                file: path.clone(),
+                version: 0,
+            });
         }
 
         Editor {
             mode: EditorMode::Control,
             status: EditorStatus::None,
-            highlights: vec![],
             lines,
+            line_colors,
             selections: vec![TextRange {
                 start: TextPosition { line: 0, byte: 0 },
                 end: TextPosition { line: 0, byte: 0 },
             }],
             edits_queue: vec![],
+            lsp_sender,
+            version: 0,
+            last_highlights: vec![],
+            last_semantic_tokens_result_id: None,
+            diagnostics: vec![],
+        }
+    }
+
+    pub fn apply_full_highlights(
+        &mut self,
+        version: u32,
+        highlights: Vec<Highlight>,
+        result_id: Option<String>,
+    ) {
+        if version != self.version {
+            eprintln!("received outdated highlights: {version} {}", self.version);
+            return;
+        }
+
+        eprintln!("applying highlights: {}", self.version);
+        for highlight in &highlights {
+            let colors = &mut self.line_colors[highlight.line as usize]
+                [highlight.start_byte as usize..highlight.end_byte as usize];
+            colors.fill(highlight.color);
+        }
+
+        self.last_semantic_tokens_result_id = result_id;
+        self.last_highlights = highlights;
+    }
+
+    pub fn apply_highlights_delta(
+        &mut self,
+        version: u32,
+        delta: HighlightsDelta,
+        result_id: Option<String>,
+    ) {
+        if version != self.version {
+            eprintln!("received outdated highlights: {version} {}", self.version);
+            return;
+        }
+
+        eprintln!("applying highlights: {}", self.version);
+
+        delta.apply_to(&mut self.last_highlights, |highlight| {
+            let colors = &mut self.line_colors[highlight.line as usize]
+                [highlight.start_byte as usize..highlight.end_byte as usize];
+            colors.fill(highlight.color);
+        });
+
+        self.last_semantic_tokens_result_id = result_id;
+    }
+
+    pub fn set_diagnostics(&mut self, diagnostics: Vec<Diagnostic>, version: u32) {
+        if self.version == version {
+            self.diagnostics = diagnostics;
+            eprintln!("set diagnostics");
+        } else {
+            eprintln!("discarding diagnostics {} {}", self.version, version);
         }
     }
 
@@ -140,9 +307,31 @@ impl Editor {
                 panic!("queue contains invalid text edits");
             }
         }
+        if !self.edits_queue.is_empty() {
+            self.version += 1;
+            if let Some(lsp) = &self.lsp_sender {
+                lsp.send(lsp::RequestEvent::DidChange {
+                    file: self_path.to_path_buf(),
+                    edits: self.edits_queue.clone(),
+                    version: self.version,
+                });
+                lsp.send(match self.last_semantic_tokens_result_id.clone() {
+                    Some(result_id) => lsp::RequestEvent::SemanticTokensDelta {
+                        file: self_path.to_path_buf(),
+                        version: self.version,
+                        previous_result_id: result_id,
+                    },
+                    None => lsp::RequestEvent::SemanticTokens {
+                        file: self_path.to_path_buf(),
+                        version: self.version,
+                    },
+                });
+            }
+        }
         while let Some(edit) = self.edits_queue.pop() {
             self.apply_edit(edit);
         }
+        eprintln!("document is now at version {}", self.version);
         event
     }
 
@@ -368,12 +557,25 @@ impl Editor {
             .min(self.lines[edit.end.line as usize].len() as u32);
 
         let mut lines: Vec<_> = edit.text.split('\n').map(|line| line.to_string()).collect();
+        let mut line_colors: Vec<_> = edit
+            .text
+            .split('\n')
+            .map(|line| vec![[0, 0, 0, 255]; line.len()])
+            .collect();
         let front_slice = &self.lines[edit.start.line as usize][..(edit.start.byte as usize)];
         let back_slice = &self.lines[edit.end.line as usize][(edit.end.byte as usize)..];
+        let front_color_slice =
+            &self.line_colors[edit.start.line as usize][..(edit.start.byte as usize)];
+        let back_color_slice =
+            &self.line_colors[edit.end.line as usize][(edit.end.byte as usize)..];
 
         let shift = edit.start.line as i32 - edit.end.line as i32 - 1 + lines.len() as i32;
 
         lines.first_mut().unwrap().insert_str(0, front_slice);
+        line_colors
+            .first_mut()
+            .unwrap()
+            .splice(0..0, front_color_slice.iter().copied());
 
         let inline_shift = { lines.last().unwrap().len() as i32 - edit.end.byte as i32 };
 
@@ -431,10 +633,24 @@ impl Editor {
             });
         }
 
+        {
+            self.diagnostics.retain_mut(|diagnostic| {
+                diagnostic.range.end < edit.start || diagnostic.range.start > edit.end
+            });
+        }
+
         lines.last_mut().unwrap().push_str(back_slice);
+        line_colors
+            .last_mut()
+            .unwrap()
+            .extend_from_slice(&back_color_slice);
 
         self.lines
             .splice(edit.start.line as usize..=edit.end.line as usize, lines);
+        self.line_colors.splice(
+            edit.start.line as usize..=edit.end.line as usize,
+            line_colors,
+        );
 
         eprintln!("edit took {:.2?}", start.elapsed());
     }
@@ -721,10 +937,10 @@ pub struct TextPosition {
 }
 
 #[derive(Debug, Clone)]
-struct Edit<'text> {
-    start: TextPosition,
-    end: TextPosition,
-    text: Cow<'text, str>,
+pub struct Edit<'text> {
+    pub start: TextPosition,
+    pub end: TextPosition,
+    pub text: Cow<'text, str>,
     affinity: Affinity,
 }
 
@@ -732,6 +948,12 @@ struct Edit<'text> {
 pub struct TextRange {
     pub start: TextPosition,
     pub end: TextPosition,
+}
+
+#[derive(Debug)]
+pub struct Diagnostic {
+    pub message: String,
+    pub range: TextRange,
 }
 
 struct Selection<'a> {
@@ -760,7 +982,7 @@ impl<'a> Selection<'a> {
         chars(self.lines, self.range.end)
     }
 
-    fn try_down(&mut self, modifiers: ModifiersState) -> bool {
+    fn try_down(&mut self, _modifiers: ModifiersState) -> bool {
         if self.range.end.line < self.lines.len() as u32 - 1 {
             self.range.end.line += 1;
             true
@@ -769,7 +991,7 @@ impl<'a> Selection<'a> {
         }
     }
 
-    fn try_up(&mut self, modifiers: ModifiersState) -> bool {
+    fn try_up(&mut self, _modifiers: ModifiersState) -> bool {
         if self.range.start.line > 0 {
             self.range.start.line -= 1;
             true
