@@ -4,19 +4,22 @@ use std::{
     path::{Component, Path, PathBuf, Prefix},
     process::{Command, Stdio},
     str::FromStr,
-    sync::{atomic::AtomicU64, mpsc},
+    sync::{atomic::AtomicU64, mpsc, Arc, Mutex},
     thread,
 };
 
 use caarr::EventChannel;
 use lsp_types::{
     notification::{self, Notification, PublishDiagnostics},
-    request, CompletionContext, CompletionParams, CompletionResponse, CompletionTriggerKind,
+    request, CompletionClientCapabilities, CompletionContext, CompletionItemCapability,
+    CompletionItemCapabilityResolveSupport, CompletionItemKindCapability, CompletionItemTag,
+    CompletionListCapability, CompletionParams, CompletionResponse, CompletionTriggerKind,
     DidChangeTextDocumentParams, DidOpenTextDocumentParams, InitializeParams, InitializedParams,
-    Position, PublishDiagnosticsParams, Range, SemanticToken, SemanticTokenType,
-    SemanticTokensClientCapabilities, SemanticTokensClientCapabilitiesRequests,
-    SemanticTokensDeltaParams, SemanticTokensFullDeltaResult, SemanticTokensFullOptions,
-    SemanticTokensParams, SemanticTokensResult, SemanticTokensServerCapabilities,
+    InsertTextMode, InsertTextModeSupport, MarkupKind, Position, PublishDiagnosticsParams, Range,
+    SemanticToken, SemanticTokenType, SemanticTokensClientCapabilities,
+    SemanticTokensClientCapabilitiesRequests, SemanticTokensDeltaParams,
+    SemanticTokensFullDeltaResult, SemanticTokensFullOptions, SemanticTokensParams,
+    SemanticTokensResult, SemanticTokensServerCapabilities, TagSupport,
     TextDocumentContentChangeEvent, TextDocumentIdentifier, TextDocumentItem,
     TextDocumentPositionParams, TextDocumentSyncClientCapabilities, TokenFormat,
     VersionedTextDocumentIdentifier,
@@ -25,7 +28,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
 
 use crate::{
-    editor::{Diagnostic, Edit, TextPosition, TextRange},
+    editor::{self, Diagnostic, Edit, TextPosition, TextRange},
     Event,
 };
 
@@ -46,6 +49,11 @@ pub enum ResponseEvent {
         version: u32,
         path: PathBuf,
         diagnostics: Vec<Diagnostic>,
+    },
+    Completion {
+        file: PathBuf,
+        token: u32,
+        items: Vec<editor::CompletionItem>,
     },
 }
 
@@ -71,8 +79,16 @@ pub enum RequestEvent {
     },
     Completion {
         file: PathBuf,
+        token: u32,
         position: TextPosition,
+        invoked: bool,
     },
+}
+
+#[derive(Clone)]
+pub struct LspHandle {
+    pub request_sender: mpsc::Sender<RequestEvent>,
+    pub completion_trigger_chars: Arc<Mutex<Vec<char>>>,
 }
 
 #[derive(Serialize)]
@@ -99,7 +115,27 @@ struct LspMessage<'r> {
     id: Option<u64>,
     method: Option<&'r str>,
     params: Option<&'r RawValue>,
-    result: Option<&'r RawValue>,
+    #[serde(default)]
+    result: Missing<&'r RawValue>,
+}
+
+#[derive(Deserialize)]
+#[serde(from = "T")]
+enum Missing<T> {
+    Some(T),
+    None,
+}
+
+impl<T> From<T> for Missing<T> {
+    fn from(value: T) -> Self {
+        Missing::Some(value)
+    }
+}
+
+impl<T> Default for Missing<T> {
+    fn default() -> Self {
+        Self::None
+    }
 }
 
 #[derive(Deserialize)]
@@ -109,11 +145,10 @@ struct AnyResponse {
     whole_message: String,
 }
 
-pub fn start_server(
-    exe_path: PathBuf,
-    app_channel: EventChannel<Event>,
-) -> mpsc::Sender<RequestEvent> {
+pub fn start_server(exe_path: PathBuf, app_channel: EventChannel<Event>) -> LspHandle {
     let (request_tx, request_rx) = mpsc::channel();
+    let completion_trigger_chars = Arc::new(Mutex::new(vec![]));
+    let completion_trigger_chars_out = completion_trigger_chars.clone();
 
     thread::spawn(move || {
         let mut server_process = Command::new(exe_path)
@@ -130,6 +165,17 @@ pub fn start_server(
             send_request::<request::Initialize>(&mut writer, &reader, initialize()).unwrap();
 
         send_notification::<notification::Initialized>(&mut writer, InitializedParams {}).unwrap();
+
+        let trigger_characters: Vec<_> = init_response
+            .capabilities
+            .completion_provider
+            .and_then(|provider| provider.trigger_characters)
+            .unwrap_or_default()
+            .into_iter()
+            .flat_map(|string| string.chars().next())
+            .collect();
+
+        *completion_trigger_chars.lock().unwrap() = trigger_characters;
 
         let tokens_legend = init_response
             .capabilities
@@ -305,7 +351,12 @@ pub fn start_server(
                         }
                     }
                 }
-                RequestEvent::Completion { file, position } => {
+                RequestEvent::Completion {
+                    file,
+                    position,
+                    token,
+                    invoked,
+                } => {
                     if let Some(response) = send_request::<request::Completion>(
                         &mut writer,
                         &reader,
@@ -313,7 +364,10 @@ pub fn start_server(
                             partial_result_params: Default::default(),
                             work_done_progress_params: Default::default(),
                             context: Some(CompletionContext {
-                                trigger_kind: CompletionTriggerKind::INVOKED,
+                                trigger_kind: match invoked {
+                                    true => CompletionTriggerKind::INVOKED,
+                                    false => CompletionTriggerKind::TRIGGER_CHARACTER,
+                                },
                                 trigger_character: None,
                             }),
                             text_document_position: TextDocumentPositionParams {
@@ -329,21 +383,29 @@ pub fn start_server(
                     )
                     .unwrap()
                     {
-                        let items = match response {
-                            CompletionResponse::Array(array) => array,
-                            CompletionResponse::List(list) => list.items,
+                        let (items, is_incomplete) = match response {
+                            CompletionResponse::Array(array) => (array, false),
+                            CompletionResponse::List(list) => (list.items, list.is_incomplete),
                         };
 
-                        // for item in items {
-                        //     item
-                        // }
+                        app_channel.send_event(Event::Lsp(ResponseEvent::Completion {
+                            file,
+                            token,
+                            items: items
+                                .into_iter()
+                                .map(|item| editor::CompletionItem { label: item.label })
+                                .collect(),
+                        }));
                     }
                 }
             }
         }
     });
 
-    request_tx
+    LspHandle {
+        request_sender: request_tx,
+        completion_trigger_chars: completion_trigger_chars_out,
+    }
 }
 
 fn start_reader(
@@ -363,7 +425,7 @@ fn start_reader(
                     panic!("{}", e);
                 }
             };
-            if let Some(result) = message.result {
+            if let Missing::Some(result) = message.result {
                 if let Some(id) = message.id {
                     tx.send(AnyResponse {
                         id,
@@ -377,8 +439,8 @@ fn start_reader(
                     })
                     .unwrap();
                 }
-            } else {
-                match message.method.unwrap() {
+            } else if let Some(method) = message.method {
+                match method {
                     notification::PublishDiagnostics::METHOD => {
                         let body: PublishDiagnosticsParams =
                             serde_json::from_str(message.params.unwrap().get()).unwrap();
@@ -418,6 +480,8 @@ fn start_reader(
                     }
                     _ => {}
                 }
+            } else {
+                eprintln!("unknown message: {}", body);
             }
         }
     });
@@ -685,7 +749,45 @@ fn initialize() -> InitializeParams {
                     will_save_wait_until: None,
                     did_save: None,
                 }),
-                completion: None,
+                completion: Some(CompletionClientCapabilities {
+                    dynamic_registration: None,
+                    completion_item: Some(CompletionItemCapability {
+                        snippet_support: None,
+                        commit_characters_support: Some(true),
+                        documentation_format: Some(vec![
+                            MarkupKind::Markdown,
+                            MarkupKind::PlainText,
+                        ]),
+                        deprecated_support: Some(true),
+                        preselect_support: Some(true),
+                        tag_support: Some(TagSupport {
+                            value_set: vec![CompletionItemTag::DEPRECATED],
+                        }),
+                        insert_replace_support: Some(true),
+                        resolve_support: Some(CompletionItemCapabilityResolveSupport {
+                            properties: vec!["documentation".to_string()],
+                        }),
+                        insert_text_mode_support: Some(InsertTextModeSupport {
+                            value_set: vec![
+                                InsertTextMode::AS_IS,
+                                InsertTextMode::ADJUST_INDENTATION,
+                            ],
+                        }),
+                        label_details_support: Some(true),
+                    }),
+                    completion_item_kind: None,
+                    context_support: Some(true),
+                    insert_text_mode: None,
+                    completion_list: Some(CompletionListCapability {
+                        item_defaults: Some(vec![
+                            "commitCharacters".to_string(),
+                            "editRange".to_string(),
+                            "insertTextFormat".to_string(),
+                            "insertTextMode".to_string(),
+                            "data".to_string(),
+                        ]),
+                    }),
+                }),
                 hover: None,
                 signature_help: None,
                 references: None,

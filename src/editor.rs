@@ -14,7 +14,7 @@ use caarr::{text::TextLine, Key, KeyEvent, ModifiersState, NamedKey, Rect};
 use unicode_segmentation::GraphemeCursor;
 
 use crate::{
-    lsp::{self, Highlight, HighlightsDelta},
+    lsp::{self, Highlight, HighlightsDelta, LspHandle},
     BASE_FONT, LINE_HEIGHT,
 };
 
@@ -43,11 +43,14 @@ pub struct Editor {
     line_colors: Vec<Vec<[u8; 4]>>,
     selections: Vec<TextRange>,
     edits_queue: Vec<Edit<'static>>,
-    lsp_sender: Option<mpsc::Sender<lsp::RequestEvent>>,
+    lsp: Option<LspHandle>,
     version: u32,
+    request_completion: bool,
     last_semantic_tokens_result_id: Option<String>,
     last_highlights: Vec<Highlight>,
     diagnostics: Vec<Diagnostic>,
+    completion_state: CompletionState,
+    next_completion_token: u32,
 }
 
 impl Editor {
@@ -68,6 +71,8 @@ impl Editor {
         let last_visible_line = (top_px_offset + height)
             .div_ceil(LINE_HEIGHT)
             .min(self.lines.len() as u32);
+
+        let mut completion_boxes = vec![];
 
         let visible_range = first_visible_line as usize..last_visible_line as usize;
         self.lines[visible_range.clone()]
@@ -154,6 +159,24 @@ impl Editor {
                         let end_offset = get_px_offset_in_line(&text_line, end) + nudge;
                         selection_rect.set_pos(start_offset as i32, 0);
                         selection_rect.set_size(end_offset - start_offset, LINE_HEIGHT);
+
+                        if let CompletionState::Items(items) = &self.completion_state {
+                            let completions_box = Rect::new();
+
+                            for (i, item) in items.iter().enumerate() {
+                                let mut text = TextLine::new();
+                                text.set_text(*BASE_FONT, [(&*item.label, [0, 0, 0, 255])]);
+                                text.rect.set_pos(0, (i as u32 * LINE_HEIGHT) as i32);
+                                completions_box.append_child(text.rect);
+                            }
+
+                            completions_box.set_bg_color([140, 140, 140, 255]);
+                            completions_box
+                                .set_pos(30 + end_offset as i32, ((idx + 1) * LINE_HEIGHT) as i32);
+                            completions_box.set_size(200, items.len() as u32 * LINE_HEIGHT);
+                            completion_boxes.push(completions_box);
+                        }
+
                         break;
                     }
                 }
@@ -194,6 +217,10 @@ impl Editor {
                 lines_container.append_child(number.rect);
             });
 
+        for completions_box in completion_boxes {
+            lines_container.append_child(completions_box);
+        }
+
         lines_container.set_pos(
             -(left_px_offset as i32),
             -((top_px_offset % LINE_HEIGHT) as i32),
@@ -202,11 +229,7 @@ impl Editor {
         main_box
     }
 
-    pub fn new(
-        mut text: String,
-        path: PathBuf,
-        lsp_sender: Option<mpsc::Sender<lsp::RequestEvent>>,
-    ) -> Self {
+    pub fn new(mut text: String, path: PathBuf, lsp_handle: Option<LspHandle>) -> Self {
         if text.is_empty() {
             text.push('\n');
         }
@@ -217,13 +240,13 @@ impl Editor {
             .map(|line| vec![[0, 0, 0, 255]; line.len()])
             .collect();
 
-        if let Some(lsp) = &lsp_sender {
-            lsp.send(lsp::RequestEvent::DidOpen {
+        if let Some(lsp) = &lsp_handle {
+            lsp.request_sender.send(lsp::RequestEvent::DidOpen {
                 file: path.clone(),
                 text,
                 version: 0,
             });
-            lsp.send(lsp::RequestEvent::SemanticTokens {
+            lsp.request_sender.send(lsp::RequestEvent::SemanticTokens {
                 file: path.clone(),
                 version: 0,
             });
@@ -239,11 +262,14 @@ impl Editor {
                 end: TextPosition { line: 0, byte: 0 },
             }],
             edits_queue: vec![],
-            lsp_sender,
+            lsp: lsp_handle,
             version: 0,
+            request_completion: false,
             last_highlights: vec![],
             last_semantic_tokens_result_id: None,
             diagnostics: vec![],
+            next_completion_token: 0,
+            completion_state: CompletionState::None,
         }
     }
 
@@ -300,6 +326,18 @@ impl Editor {
         }
     }
 
+    pub fn provide_completion(&mut self, items: Vec<CompletionItem>, provided_token: u32) {
+        eprintln!("providing completions: {} {} ", items.len(), provided_token);
+        match self.completion_state {
+            CompletionState::Pending { token } if token == provided_token => {
+                self.completion_state = CompletionState::Items(items);
+            }
+            _ => {
+                eprintln!("completions discarded");
+            }
+        }
+    }
+
     pub fn handle_key_event(&mut self, self_path: &Path, event: &KeyEvent) -> Option<EditorEvent> {
         let event = self.handle_key_event_inner(self_path, event);
         for edits in self.edits_queue.windows(2) {
@@ -308,28 +346,44 @@ impl Editor {
             }
         }
         if !self.edits_queue.is_empty() {
+            self.completion_state = CompletionState::None;
             self.version += 1;
-            if let Some(lsp) = &self.lsp_sender {
-                lsp.send(lsp::RequestEvent::DidChange {
+            if let Some(lsp) = &self.lsp {
+                lsp.request_sender.send(lsp::RequestEvent::DidChange {
                     file: self_path.to_path_buf(),
                     edits: self.edits_queue.clone(),
                     version: self.version,
                 });
-                lsp.send(match self.last_semantic_tokens_result_id.clone() {
-                    Some(result_id) => lsp::RequestEvent::SemanticTokensDelta {
-                        file: self_path.to_path_buf(),
-                        version: self.version,
-                        previous_result_id: result_id,
-                    },
-                    None => lsp::RequestEvent::SemanticTokens {
-                        file: self_path.to_path_buf(),
-                        version: self.version,
-                    },
-                });
+                lsp.request_sender
+                    .send(match self.last_semantic_tokens_result_id.clone() {
+                        Some(result_id) => lsp::RequestEvent::SemanticTokensDelta {
+                            file: self_path.to_path_buf(),
+                            version: self.version,
+                            previous_result_id: result_id,
+                        },
+                        None => lsp::RequestEvent::SemanticTokens {
+                            file: self_path.to_path_buf(),
+                            version: self.version,
+                        },
+                    });
             }
         }
         while let Some(edit) = self.edits_queue.pop() {
             self.apply_edit(edit);
+        }
+        if self.request_completion {
+            self.request_completion = false;
+            if let Some(lsp) = &self.lsp {
+                let token = self.next_completion_token;
+                self.next_completion_token += 1;
+                lsp.request_sender.send(lsp::RequestEvent::Completion {
+                    file: self_path.to_path_buf(),
+                    token,
+                    position: self.selections.last().as_ref().unwrap().end,
+                    invoked: false,
+                });
+                self.completion_state = CompletionState::Pending { token };
+            }
         }
         eprintln!("document is now at version {}", self.version);
         event
@@ -461,12 +515,33 @@ impl Editor {
                 Key::Character("k") => self.up(event.modifiers),
                 Key::Character("h") => self.left(event.modifiers),
                 Key::Character("l") => self.right(event.modifiers),
+                Key::Character("y") => {
+                    if let Some(lsp) = &self.lsp {
+                        let token = self.next_completion_token;
+                        self.next_completion_token += 1;
+                        self.completion_state = CompletionState::Pending { token };
+                        lsp.request_sender.send(lsp::RequestEvent::Completion {
+                            file: self_path.to_path_buf(),
+                            token,
+                            position: self.selections.last().as_ref().unwrap().end,
+                            invoked: true,
+                        });
+                    }
+                }
+
                 // Key::Character("d") => self.del(event.modifiers),
                 _ => return Some(EditorEvent::KeyUnhandled),
             },
             EditorMode::Edit => match event.key {
                 Key::Character(char) => {
                     self.insert_text_before(Cow::Owned(char.to_string()));
+                    if self.lsp.as_ref().is_some_and(|lsp| {
+                        char.chars().last().is_some_and(|char| {
+                            lsp.completion_trigger_chars.lock().unwrap().contains(&char)
+                        })
+                    }) {
+                        self.request_completion = true;
+                    }
                 }
                 Key::Named(NamedKey::Escape) => {
                     self.mode = EditorMode::Control;
@@ -900,6 +975,8 @@ impl Editor {
     }
 
     fn move_selections(&mut self, mut fun: impl FnMut(Selection)) {
+        self.completion_state = CompletionState::None;
+
         let mut i = self.selections.len();
         while i != 0 {
             i -= 1;
@@ -954,6 +1031,17 @@ pub struct TextRange {
 pub struct Diagnostic {
     pub message: String,
     pub range: TextRange,
+}
+
+#[derive(Debug)]
+pub struct CompletionItem {
+    pub label: String,
+}
+
+enum CompletionState {
+    None,
+    Pending { token: u32 },
+    Items(Vec<CompletionItem>),
 }
 
 struct Selection<'a> {

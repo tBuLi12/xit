@@ -12,6 +12,7 @@ use sidebar::{sidebar, SIDEBAR_WIDTH};
 use crate::{
     editor::{Editor, EditorEvent},
     file_picker::FilePicker,
+    lsp::LspHandle,
 };
 
 mod editor;
@@ -31,7 +32,7 @@ struct State {
 
 struct LspServer {
     exe_path: String,
-    request_sender: Option<mpsc::Sender<lsp::RequestEvent>>,
+    handle: Option<LspHandle>,
 }
 
 const LINE_HEIGHT: u32 = 40;
@@ -151,6 +152,11 @@ impl caarr::State for State {
                     editor.set_diagnostics(diagnostics, version);
                 }
             }
+            Event::Lsp(lsp::ResponseEvent::Completion { file, token, items }) => {
+                if let Some(editor) = app.state.editors.get_mut(&file) {
+                    editor.provide_completion(items, token);
+                }
+            }
         }
     }
 }
@@ -162,12 +168,12 @@ impl State {
             return;
         }
 
-        let lsp_sender = path
+        let lsp_handle = path
             .extension()
             .and_then(|ext| ext.to_str())
             .and_then(|ext| self.lsp_servers.get_mut(ext))
             .map(|lsp| {
-                lsp.request_sender
+                lsp.handle
                     .get_or_insert_with(|| {
                         start_server(PathBuf::from(&lsp.exe_path), channel.clone())
                     })
@@ -176,7 +182,7 @@ impl State {
 
         let text = fs::read_to_string(&path).unwrap();
 
-        let new_editor = Editor::new(text, path.clone(), lsp_sender);
+        let new_editor = Editor::new(text, path.clone(), lsp_handle);
 
         self.editors.insert(path.clone(), new_editor);
 
@@ -221,7 +227,7 @@ fn main() {
             "rs".to_string(),
             LspServer {
                 exe_path: "rust-analyzer".to_string(),
-                request_sender: None,
+                handle: None,
             },
         )]),
     });
